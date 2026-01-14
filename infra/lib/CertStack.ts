@@ -1,10 +1,9 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
-import * as route53 from "aws-cdk-lib/aws-route53";
 
 export interface CertStackProps extends cdk.StackProps {
-  hostedZoneDomain: string;  // "store.eg"
+  domainName: string; // "cairoessentials.com"
 }
 
 export class CertStack extends cdk.Stack {
@@ -13,21 +12,16 @@ export class CertStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: CertStackProps) {
     super(scope, id, props);
 
-    const zone = route53.HostedZone.fromLookup(this, "Zone", {
-      domainName: props.hostedZoneDomain,
-    });
-
-    const cert = new acm.DnsValidatedCertificate(this, "WildcardCert", {
-      domainName: `*.${props.hostedZoneDomain}`,
-      hostedZone: zone,
-      region: "us-east-1", // critical for CloudFront
-      subjectAlternativeNames: [props.hostedZoneDomain],
+    const cert = new acm.Certificate(this, "WildcardCert", {
+      domainName: `*.${props.domainName}`,
+      subjectAlternativeNames: [props.domainName],
+      validation: acm.CertificateValidation.fromDns(), // manual
     });
 
     this.certificateArn = cert.certificateArn;
 
-    new cdk.CfnOutput(this, "StorefrontCertArn", {
-      value: this.certificateArn,
+    new cdk.CfnOutput(this, "CertArn", {
+      value: cert.certificateArn,
     });
   }
 }
