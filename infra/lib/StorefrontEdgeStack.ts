@@ -8,8 +8,8 @@ import * as acm from "aws-cdk-lib/aws-certificatemanager";
 
 export interface StorefrontEdgeStackProps extends cdk.StackProps {
   tenantApiUrl: string;
-  certificateArn: string; // from CertStack (us-east-1)
-  domainNames: string[];  // ["*.store.eg", "store.eg"] (optional)
+  certificateArn?: string; // OPTIONAL for Phase 1
+  domainNames?: string[]; // OPTIONAL for Phase 1
 }
 
 export class StorefrontEdgeStack extends cdk.Stack {
@@ -29,36 +29,62 @@ export class StorefrontEdgeStack extends cdk.Stack {
       authType: lambda.FunctionUrlAuthType.NONE,
     });
 
-    const cert = acm.Certificate.fromCertificateArn(
-      this,
-      "StorefrontCert",
-      props.certificateArn
-    );
-
     // Cache varies per hostname; do NOT cache across stores
-    const cachePolicy = new cloudfront.CachePolicy(this, "PerHostCachePolicy", {
-      headerBehavior: cloudfront.CacheHeaderBehavior.allowList("host"),
-      queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
-      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
-      defaultTtl: cdk.Duration.seconds(30), // tiny TTL for now
-      maxTtl: cdk.Duration.minutes(5),
-      minTtl: cdk.Duration.seconds(0),
-    });
+const cachePolicy = new cloudfront.CachePolicy(this, "NoHostCachePolicy", {
+  headerBehavior: cloudfront.CacheHeaderBehavior.none(), // ✅ important
+  queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
+  cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+  defaultTtl: cdk.Duration.seconds(0),
+  maxTtl: cdk.Duration.seconds(0),
+  minTtl: cdk.Duration.seconds(0),
+});
 
-    const originRequestPolicy = new cloudfront.OriginRequestPolicy(
+    // ✅ DO NOT forward Host to a Lambda Function URL origin.
+    // Instead, forward a safe header we set at the edge: x-forwarded-host
+const originRequestPolicy = new cloudfront.OriginRequestPolicy(
+  this,
+  "ForwardTenantHeaders",
+  {
+    headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(
+      "x-forwarded-host",
+      "x-correlation-id"
+    ),
+    queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.none(),
+    cookieBehavior: cloudfront.OriginRequestCookieBehavior.none(),
+  }
+);
+
+
+    // ✅ CloudFront Function: copy viewer Host into x-forwarded-host
+    const addForwardedHostFn = new cloudfront.Function(
       this,
-      "ForwardHostHeader",
+      "AddXForwardedHost",
       {
-        headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList("host"),
-        queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.none(),
-        cookieBehavior: cloudfront.OriginRequestCookieBehavior.none(),
+        code: cloudfront.FunctionCode.fromInline(`
+function handler(event) {
+  var req = event.request;
+
+  // If caller already provided x-forwarded-host (useful for Phase 0 testing), keep it.
+  if (req.headers["x-forwarded-host"] && req.headers["x-forwarded-host"].value) {
+    return req;
+  }
+
+  // Otherwise derive from viewer Host (real DNS+cert phase)
+  var h = req.headers.host && req.headers.host.value ? req.headers.host.value : "";
+  if (h) {
+    req.headers["x-forwarded-host"] = { value: h };
+  }
+
+  return req;
+}
+        `.trim()),
       }
     );
 
     const distribution = new cloudfront.Distribution(this, "StorefrontDist", {
       defaultBehavior: {
         origin: new origins.HttpOrigin(
-          cdk.Fn.select(2, cdk.Fn.split("/", fnUrl.url)), // extracts domain from Function URL
+          cdk.Fn.select(2, cdk.Fn.split("/", fnUrl.url)),
           {
             protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
           }
@@ -66,9 +92,24 @@ export class StorefrontEdgeStack extends cdk.Stack {
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy,
         originRequestPolicy,
+        functionAssociations: [
+          {
+            function: addForwardedHostFn,
+            eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+          },
+        ],
       },
+
+      // Only applied if provided
       domainNames: props.domainNames,
-      certificate: cert,
+      certificate: props.certificateArn
+        ? acm.Certificate.fromCertificateArn(
+            this,
+            "StorefrontCert",
+            props.certificateArn
+          )
+        : undefined,
+
       comment: "Wasit storefront SSR stub",
     });
 

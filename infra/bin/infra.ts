@@ -43,6 +43,6 @@ new StorefrontEdgeStack(app, "wasit-dev-storefront-edge", {
   crossRegionReferences: true, // ← ADD THIS LINE
 
   tenantApiUrl: tenant.apiUrl,
-  certificateArn: cert.certificateArn,
-  domainNames: ["*.store.eg", "store.eg"],
+  //certificateArn: cert.certificateArn,
+  //domainNames: ["*.store.eg", "store.eg"],
 });
