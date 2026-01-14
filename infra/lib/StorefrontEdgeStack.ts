@@ -58,7 +58,7 @@ const originRequestPolicy = new cloudfront.OriginRequestPolicy(
     // ✅ CloudFront Function: copy viewer Host into x-forwarded-host
     const addForwardedHostFn = new cloudfront.Function(
       this,
-      "AddXForwardedHost",
+      "AddXForwardedHostV2",
       {
         code: cloudfront.FunctionCode.fromInline(`
 function handler(event) {
