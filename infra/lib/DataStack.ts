@@ -133,15 +133,15 @@ export class DataStack extends cdk.Stack {
     // ========= Inventory (stock + reservations) =========
     // PK=productId, SK=recordType where recordType is LOC#<id> or RSV#<id>
     // Reservation items should include expiresAt and you can TTL them by enabling TTL on attribute "expiresAt".
-    this.inventoryTable = new dynamodb.Table(this, "InventoryTable", {
-      tableName: "inventory",
-      partitionKey: { name: "productId", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "recordType", type: dynamodb.AttributeType.STRING }, // LOC#/RSV#
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      encryption: dynamodb.TableEncryption.AWS_MANAGED,
-      removalPolicy: cdk.RemovalPolicy.DESTROY, // dev
-    });
-
+this.inventoryTable = new dynamodb.Table(this, "InventoryTable", {
+  tableName: "inventory",
+  partitionKey: { name: "productId", type: dynamodb.AttributeType.STRING },
+  sortKey: { name: "recordType", type: dynamodb.AttributeType.STRING }, // LOC#/RSV#
+  billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+  encryption: dynamodb.TableEncryption.AWS_MANAGED,
+  removalPolicy: cdk.RemovalPolicy.DESTROY, // dev
+  timeToLiveAttribute: "expiresAt", // ✅ TTL attribute for reservation records
+});
     // Release reservations by orderId
     this.inventoryTable.addGlobalSecondaryIndex({
       indexName: "gsi_order",
@@ -149,9 +149,6 @@ export class DataStack extends cdk.Stack {
       sortKey: { name: "productId", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
-
-    // TTL only applies to reservation records that set expiresAt
-    this.inventoryTable.addTimeToLiveAttribute("expiresAt");
 
     // ========= Fulfillment Jobs =========
     this.fulfillmentJobsTable = new dynamodb.Table(this, "FulfillmentJobsTable", {
