@@ -1,4 +1,3 @@
-// infra/lib/domains/StorefrontEdgeStack.ts
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 
@@ -16,20 +15,15 @@ import * as iam from "aws-cdk-lib/aws-iam";
 
 export interface StorefrontEdgeStackProps extends cdk.StackProps {
   tenantApiUrl: string;
+  stage: string;
 
-  stage: string; // owned by infra.ts
-
-  // Domain config (owned by infra.ts)
   domainNames?: string[];
 
-  // TLS (owned by EdgeDomainsStack, wired by infra.ts)
   certificateArn?: string;
 
-  // Route53 zone (owned by EdgeDomainsStack, wired by infra.ts)
   tenantHostedZone?: route53.IHostedZone;
-  domainRecordName?: string; // default "*"
+  domainRecordName?: string;
 
-  // Observability wiring (owned by ObservabilityStack)
   logDeliveryStreamArn: string;
 }
 
@@ -40,10 +34,18 @@ export class StorefrontEdgeStack extends cdk.Stack {
     super(scope, id, props);
 
     const stage = (props.stage ?? "dev").toLowerCase();
-    const effectiveDomainNames = props.domainNames;
+    const functionName = `wasit-${stage}-storefront-ssr`;
 
-    // ---------------- SSR Lambda ----------------
+    const ssrLogGroup = new logs.LogGroup(this, "StorefrontSsrLogGroup", {
+      logGroupName: `/aws/lambda/${functionName}`,
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy:
+        stage === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     const ssrFn = new nodeLambda.NodejsFunction(this, "StorefrontSsrFn", {
+      functionName,
+      logGroup: ssrLogGroup,
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: "lambda/storefront-ssr/index.ts",
       handler: "handler",
@@ -54,19 +56,8 @@ export class StorefrontEdgeStack extends cdk.Stack {
       },
     });
 
-    // ---------------- Ensure LogGroup exists (avoid flaky deploy) ----------------
-    const ssrLogGroup = new logs.LogGroup(this, "StorefrontSsrLogGroup", {
-      logGroupName: `/aws/lambda/${ssrFn.functionName}`,
-      retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy:
-        stage === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-    });
-
-    // ---------------- Observability: CloudWatch Logs -> Firehose (L1) ----------------
     const cwLogsToFirehoseRole = new iam.Role(this, "CwLogsToFirehoseRole", {
       assumedBy: new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`),
-      description:
-        "Allows CloudWatch Logs subscription filter to write into Firehose",
     });
 
     const cwLogsToFirehosePolicy = new iam.Policy(
@@ -98,12 +89,10 @@ export class StorefrontEdgeStack extends cdk.Stack {
     logsSub.node.addDependency(cwLogsToFirehosePolicy);
     logsSub.node.addDependency(cwLogsToFirehoseRole);
 
-    // ---------------- Lambda Function URL origin ----------------
     const fnUrl = ssrFn.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
     });
 
-    // ---------------- CloudFront policies ----------------
     const cachePolicy = new cloudfront.CachePolicy(this, "NoHostCachePolicy", {
       headerBehavior: cloudfront.CacheHeaderBehavior.none(),
       queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
@@ -153,7 +142,6 @@ function handler(event) {
 
     const fnUrlHost = cdk.Fn.select(2, cdk.Fn.split("/", fnUrl.url));
 
-    // ---------------- CloudFront distribution ----------------
     const distribution = new cloudfront.Distribution(this, "StorefrontDist", {
       defaultBehavior: {
         origin: new origins.HttpOrigin(fnUrlHost, {
@@ -170,7 +158,7 @@ function handler(event) {
         ],
       },
 
-      domainNames: effectiveDomainNames,
+      domainNames: props.domainNames,
       certificate: props.certificateArn
         ? acm.Certificate.fromCertificateArn(
             this,
@@ -184,12 +172,7 @@ function handler(event) {
 
     this.distributionDomainName = distribution.distributionDomainName;
 
-    // ---------------- Route53 alias record (owned here) ----------------
-    if (
-      props.tenantHostedZone &&
-      effectiveDomainNames &&
-      effectiveDomainNames.length > 0
-    ) {
+    if (props.tenantHostedZone && props.domainNames?.length) {
       new route53.ARecord(this, "TenantWildcardAlias", {
         zone: props.tenantHostedZone,
         recordName: props.domainRecordName ?? "*",
@@ -199,7 +182,6 @@ function handler(event) {
       });
     }
 
-    // ---------------- Outputs ----------------
     new cdk.CfnOutput(this, "StorefrontCloudFrontDomain", {
       value: distribution.distributionDomainName,
     });

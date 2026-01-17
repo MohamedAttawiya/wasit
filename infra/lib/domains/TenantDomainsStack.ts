@@ -6,10 +6,8 @@ import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as s3 from "aws-cdk-lib/aws-s3";
 
 export interface TenantDomainsStackProps extends cdk.StackProps {
-  tenantRootDomain: string; // e.g. store.eg or cairoessentials.com
-
-  // naming/ops
-  stage: string; // "dev" | "prod" | ...
+  tenantRootDomain: string; // store.eg or cairoessentials.com
+  stage: string; // dev/prod
 }
 
 export class TenantDomainsStack extends cdk.Stack {
@@ -22,28 +20,26 @@ export class TenantDomainsStack extends cdk.Stack {
 
     const stage = (props.stage ?? "dev").toLowerCase();
 
-    // ---------------- Hosted Zone ----------------
     const tenantZone = new route53.PublicHostedZone(this, "TenantZone", {
       zoneName: props.tenantRootDomain,
     });
     this.tenantZone = tenantZone;
 
-    // ---------------- Certificate ----------------
-    // NOTE: CloudFront requires the cert in us-east-1.
-    // If you need CloudFront custom domains, replace with:
-    // new acm.DnsValidatedCertificate(... region: "us-east-1")
-    new acm.DnsValidatedCertificate(this, "TenantWildcardCert", {
-      domainName: `*.${props.tenantRootDomain}`,
-      hostedZone: tenantZone,
-      region: "us-east-1",
-    });
-
+    // CloudFront requires the cert in us-east-1
+    const tenantWildcardCert = new acm.DnsValidatedCertificate(
+      this,
+      "TenantWildcardCert",
+      {
+        domainName: `*.${props.tenantRootDomain}`,
+        hostedZone: tenantZone,
+        region: "us-east-1",
+      }
+    );
 
     this.tenantWildcardCertArn = tenantWildcardCert.certificateArn;
 
-    // ---------------- Frontend Bucket (tenant-frontend) ----------------
     const tenantFrontendBucket = new s3.Bucket(this, "TenantFrontendBucket", {
-      bucketName: `wasit-${stage}-tenant-frontend-${this.account}-${this.region}`,
+      bucketName: `wasit-${stage}-tenant-frontend-${this.account}-${this.region}`.toLowerCase(),
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
@@ -52,16 +48,19 @@ export class TenantDomainsStack extends cdk.Stack {
         stage === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: stage === "prod" ? false : true,
     });
-
     this.tenantFrontendBucket = tenantFrontendBucket;
 
-    // ---------------- Outputs ----------------
     new cdk.CfnOutput(this, "TenantWildcardCertArn", {
       value: tenantWildcardCert.certificateArn,
     });
 
-    new cdk.CfnOutput(this, "TenantHostedZoneId", { value: tenantZone.hostedZoneId });
-    new cdk.CfnOutput(this, "TenantHostedZoneName", { value: tenantZone.zoneName });
+    new cdk.CfnOutput(this, "TenantHostedZoneId", {
+      value: tenantZone.hostedZoneId,
+    });
+
+    new cdk.CfnOutput(this, "TenantHostedZoneName", {
+      value: tenantZone.zoneName,
+    });
 
     new cdk.CfnOutput(this, "TenantFrontendBucketName", {
       value: tenantFrontendBucket.bucketName,
