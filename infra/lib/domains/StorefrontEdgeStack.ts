@@ -1,33 +1,46 @@
-// lib/StorefrontEdgeStack.ts
+// infra/lib/domains/StorefrontEdgeStack.ts
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
+
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as nodeLambda from "aws-cdk-lib/aws-lambda-nodejs";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 
-// ✅ Observability wiring (NO aws-logs-destinations, NO firehose constructs)
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as targets from "aws-cdk-lib/aws-route53-targets";
+
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as iam from "aws-cdk-lib/aws-iam";
 
 export interface StorefrontEdgeStackProps extends cdk.StackProps {
   tenantApiUrl: string;
 
-  // ✅ Real DNS + TLS phase
-  certificateArn?: string;
+  stage: string; // owned by infra.ts
+
+  // Domain config (owned by infra.ts)
   domainNames?: string[];
 
-  // ✅ Observability wiring (explicit)
-  logDeliveryStreamArn: string; // from ObservabilityStack output
-  envName?: string; // default: "dev"
+  // TLS (owned by EdgeDomainsStack, wired by infra.ts)
+  certificateArn?: string;
+
+  // Route53 zone (owned by EdgeDomainsStack, wired by infra.ts)
+  tenantHostedZone?: route53.IHostedZone;
+  domainRecordName?: string; // default "*"
+
+  // Observability wiring (owned by ObservabilityStack)
+  logDeliveryStreamArn: string;
 }
 
 export class StorefrontEdgeStack extends cdk.Stack {
+  public readonly distributionDomainName: string;
+
   constructor(scope: Construct, id: string, props: StorefrontEdgeStackProps) {
     super(scope, id, props);
 
-    const envName = (props.envName ?? "dev").toLowerCase();
+    const stage = (props.stage ?? "dev").toLowerCase();
+    const effectiveDomainNames = props.domainNames;
 
     // ---------------- SSR Lambda ----------------
     const ssrFn = new nodeLambda.NodejsFunction(this, "StorefrontSsrFn", {
@@ -36,15 +49,20 @@ export class StorefrontEdgeStack extends cdk.Stack {
       handler: "handler",
       environment: {
         TENANT_API_URL: props.tenantApiUrl,
-
-        // ✅ helps keep log schema stable
-        ENV: envName,
+        ENV: stage,
         SERVICE: "storefront-ssr",
       },
     });
 
+    // ---------------- Ensure LogGroup exists (avoid flaky deploy) ----------------
+    const ssrLogGroup = new logs.LogGroup(this, "StorefrontSsrLogGroup", {
+      logGroupName: `/aws/lambda/${ssrFn.functionName}`,
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy:
+        stage === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---------------- Observability: CloudWatch Logs -> Firehose (L1) ----------------
-    // CloudWatch Logs service principal is region-scoped
     const cwLogsToFirehoseRole = new iam.Role(this, "CwLogsToFirehoseRole", {
       assumedBy: new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`),
       description:
@@ -69,18 +87,16 @@ export class StorefrontEdgeStack extends cdk.Stack {
     );
     cwLogsToFirehosePolicy.attachToRole(cwLogsToFirehoseRole);
 
-    const ssrLogGroupName = `/aws/lambda/${ssrFn.functionName}`;
-
-    const sub = new logs.CfnSubscriptionFilter(this, "SsrLogsToFirehose", {
-      logGroupName: ssrLogGroupName,
+    const logsSub = new logs.CfnSubscriptionFilter(this, "SsrLogsToFirehose", {
+      logGroupName: ssrLogGroup.logGroupName,
       destinationArn: props.logDeliveryStreamArn,
       roleArn: cwLogsToFirehoseRole.roleArn,
       filterPattern: "",
     });
 
-    // ✅ Force ordering: role + policy MUST exist before CW Logs tests subscription
-    sub.node.addDependency(cwLogsToFirehosePolicy);
-    sub.node.addDependency(cwLogsToFirehoseRole);
+    logsSub.node.addDependency(ssrLogGroup);
+    logsSub.node.addDependency(cwLogsToFirehosePolicy);
+    logsSub.node.addDependency(cwLogsToFirehoseRole);
 
     // ---------------- Lambda Function URL origin ----------------
     const fnUrl = ssrFn.addFunctionUrl({
@@ -88,7 +104,6 @@ export class StorefrontEdgeStack extends cdk.Stack {
     });
 
     // ---------------- CloudFront policies ----------------
-    // ✅ Don’t cache across stores; keep it zero TTL for now
     const cachePolicy = new cloudfront.CachePolicy(this, "NoHostCachePolicy", {
       headerBehavior: cloudfront.CacheHeaderBehavior.none(),
       queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
@@ -98,8 +113,6 @@ export class StorefrontEdgeStack extends cdk.Stack {
       minTtl: cdk.Duration.seconds(0),
     });
 
-    // ✅ DO NOT forward Host to Lambda Function URL origin.
-    // Forward only safe headers we control.
     const originRequestPolicy = new cloudfront.OriginRequestPolicy(
       this,
       "ForwardTenantHeaders",
@@ -113,7 +126,6 @@ export class StorefrontEdgeStack extends cdk.Stack {
       }
     );
 
-    // ✅ CloudFront Function: copy viewer Host into x-forwarded-host (unless already provided)
     const addForwardedHostFn = new cloudfront.Function(
       this,
       "AddXForwardedHostV2",
@@ -123,7 +135,6 @@ export class StorefrontEdgeStack extends cdk.Stack {
 function handler(event) {
   var req = event.request;
 
-  // Keep explicit x-forwarded-host (useful for early header-based tests)
   if (req.headers["x-forwarded-host"] && req.headers["x-forwarded-host"].value) {
     return req;
   }
@@ -140,7 +151,6 @@ function handler(event) {
       }
     );
 
-    // Function URL looks like: https://abcde.lambda-url.eu-central-1.on.aws/
     const fnUrlHost = cdk.Fn.select(2, cdk.Fn.split("/", fnUrl.url));
 
     // ---------------- CloudFront distribution ----------------
@@ -160,8 +170,7 @@ function handler(event) {
         ],
       },
 
-      // ✅ Applied only when provided (real DNS + TLS phase)
-      domainNames: props.domainNames,
+      domainNames: effectiveDomainNames,
       certificate: props.certificateArn
         ? acm.Certificate.fromCertificateArn(
             this,
@@ -170,15 +179,33 @@ function handler(event) {
           )
         : undefined,
 
-      comment: "Wasit storefront SSR stub",
+      comment: `Wasit storefront SSR stub (${stage})`,
     });
 
+    this.distributionDomainName = distribution.distributionDomainName;
+
+    // ---------------- Route53 alias record (owned here) ----------------
+    if (
+      props.tenantHostedZone &&
+      effectiveDomainNames &&
+      effectiveDomainNames.length > 0
+    ) {
+      new route53.ARecord(this, "TenantWildcardAlias", {
+        zone: props.tenantHostedZone,
+        recordName: props.domainRecordName ?? "*",
+        target: route53.RecordTarget.fromAlias(
+          new targets.CloudFrontTarget(distribution)
+        ),
+      });
+    }
+
+    // ---------------- Outputs ----------------
     new cdk.CfnOutput(this, "StorefrontCloudFrontDomain", {
       value: distribution.distributionDomainName,
     });
 
     new cdk.CfnOutput(this, "StorefrontSsrLogGroupName", {
-      value: ssrLogGroupName,
+      value: ssrLogGroup.logGroupName,
     });
   }
 }
