@@ -1,10 +1,16 @@
-    "use strict";
+"use strict";
 
 const zlib = require("zlib");
 
 /**
  * Firehose data transform Lambda
  * Event shape: https://docs.aws.amazon.com/firehose/latest/dev/data-transformation.html
+ *
+ * Fixes:
+ * - CloudWatch/Lambda prefixes app logs (timestamp \t requestId \t level \t {json})
+ *   so we extract embedded JSON and parse it.
+ * - Filters Lambda runtime noise lines: START/END/REPORT
+ * - Partitions correctly by env/service when present in embedded JSON
  */
 
 function safeJsonParse(s) {
@@ -33,6 +39,40 @@ function coerceNumber(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+/**
+ * CloudWatch/Lambda often prefixes log lines like:
+ *   "2026-01-17T17:39:38.756Z\t<awsRequestId>\tINFO\t{...}\n"
+ * Extract the { ... } substring and parse it.
+ */
+function extractEmbeddedJsonString(msgRaw) {
+  if (typeof msgRaw !== "string") return null;
+
+  const trimmed = msgRaw.trim();
+
+  // Already pure JSON
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
+
+  // Extract first JSON object region
+  const i = msgRaw.indexOf("{");
+  const j = msgRaw.lastIndexOf("}");
+  if (i >= 0 && j > i) return msgRaw.slice(i, j + 1);
+
+  return null;
+}
+
+/** Filter Lambda runtime noise. */
+function isRuntimeNoise(msgRaw) {
+  if (typeof msgRaw !== "string") return true;
+  return (
+    msgRaw.startsWith("START RequestId:") ||
+    msgRaw.startsWith("END RequestId:") ||
+    msgRaw.startsWith("REPORT RequestId:") ||
+    msgRaw.startsWith("INIT_START") ||
+    msgRaw.startsWith("INIT_REPORT")
+  );
+}
+
+
 exports.handler = async (event) => {
   const records = (event?.records || []).map((r) => {
     try {
@@ -56,12 +96,16 @@ exports.handler = async (event) => {
       for (const e of events) {
         const msgRaw = typeof e?.message === "string" ? e.message : "";
 
-        // Try JSON parse the application log line
-        const msgObj = safeJsonParse(msgRaw);
+        // Drop noisy runtime lines (optional but strongly recommended)
+        if (isRuntimeNoise(msgRaw)) continue;
+
+        // Attempt parse of embedded JSON (or plain JSON)
+        const embeddedJsonStr = extractEmbeddedJsonString(msgRaw);
+        const msgObj = embeddedJsonStr ? safeJsonParse(embeddedJsonStr) : null;
 
         // Promote standard fields if present
-        const env = pickString(msgObj, ["env", "environment", "stage"]);
-        const service = pickString(msgObj, ["service", "svc", "serviceName"]);
+        const env = pickString(msgObj, ["env", "environment", "stage", "ENV"]);
+        const service = pickString(msgObj, ["service", "svc", "serviceName", "SERVICE"]);
         const level = pickString(msgObj, ["level", "lvl", "severity"]);
         const correlationId = pickString(msgObj, [
           "correlationId",
@@ -85,7 +129,6 @@ exports.handler = async (event) => {
         if (!derivedService && service) derivedService = service;
 
         // Keep details compact: full JSON object as string when available
-        // (Avoids Athena schema churn and keeps core columns small.)
         const details = msgObj ? JSON.stringify(msgObj) : null;
 
         const msg =
@@ -118,10 +161,10 @@ exports.handler = async (event) => {
         lines.push(JSON.stringify(row));
       }
 
-      // If no events, emit empty data but succeed (keeps Firehose happy)
+      // If no events after filtering, emit empty data but succeed (keeps Firehose happy)
       const ndjson = lines.length ? lines.join("\n") + "\n" : "";
 
-    const pkEnv = normalizeLower(derivedEnv, process.env.DEFAULT_ENV || "dev");
+      const pkEnv = normalizeLower(derivedEnv, process.env.DEFAULT_ENV || "dev");
       const pkService = normalizeLower(derivedService, "unknown");
 
       return {

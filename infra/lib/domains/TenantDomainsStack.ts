@@ -6,8 +6,9 @@ import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as s3 from "aws-cdk-lib/aws-s3";
 
 export interface TenantDomainsStackProps extends cdk.StackProps {
-  tenantRootDomain: string; // store.eg or cairoessentials.com
-  stage: string; // dev/prod
+  tenantRootDomain: string;
+  tenantWildcardDomain: string;
+  stage: string; // lifecycle only (NOT domain logic)
 }
 
 export class TenantDomainsStack extends cdk.Stack {
@@ -17,7 +18,6 @@ export class TenantDomainsStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: TenantDomainsStackProps) {
     super(scope, id, props);
-
     const stage = (props.stage ?? "dev").toLowerCase();
 
     const tenantZone = new route53.PublicHostedZone(this, "TenantZone", {
@@ -26,15 +26,16 @@ export class TenantDomainsStack extends cdk.Stack {
     this.tenantZone = tenantZone;
 
     // CloudFront requires the cert in us-east-1
-    const tenantWildcardCert = new acm.DnsValidatedCertificate(
-      this,
-      "TenantWildcardCert",
-      {
-        domainName: `*.${props.tenantRootDomain}`,
-        hostedZone: tenantZone,
-        region: "us-east-1",
-      }
-    );
+const tenantWildcardCert = new acm.DnsValidatedCertificate(
+  this,
+  "TenantWildcardCert",
+  {
+    domainName: props.tenantWildcardDomain,
+    hostedZone: tenantZone,
+    region: "us-east-1",
+  }
+);
+
 
     this.tenantWildcardCertArn = tenantWildcardCert.certificateArn;
 

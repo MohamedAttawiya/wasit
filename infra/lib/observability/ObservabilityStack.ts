@@ -10,13 +10,11 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as path from "path";
 
 export interface ObservabilityStackProps extends cdk.StackProps {
-  prefix: string; // e.g. "wasit-dev"
+  prefix: string; // naming only
+  stage: string;  // authoritative env: dev | prod | ...
 }
 
-function inferStageFromPrefix(prefix: string): string {
-  const parts = String(prefix).toLowerCase().split("-");
-  return parts.length >= 2 ? parts[parts.length - 1] : "dev";
-}
+
 
 export class ObservabilityStack extends cdk.Stack {
   public readonly logArchiveBucket: s3.Bucket;
@@ -30,7 +28,7 @@ export class ObservabilityStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
 
-    const envName = inferStageFromPrefix(props.prefix);
+ const envName = props.stage.toLowerCase();
 
     // ---------- S3: durable log archive ----------
     this.logArchiveBucket = new s3.Bucket(this, "LogArchiveBucket", {
