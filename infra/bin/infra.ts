@@ -22,7 +22,7 @@ const PREFIX = `wasit-${STAGE}`;
 const account = "226147495990";
 const envEU = { account, region: "eu-central-1" };
 
-const TENANT_ROOT_DOMAIN = STAGE === "prod" ? "store.eg" : "cairoessentials.com";
+const TENANT_ROOT_DOMAIN = STAGE === "prod" ? "store.eg" : "dev.cairoessentials.com";
 
 // CloudFront custom domains you want to serve.
 // If you also want the apex, add TENANT_ROOT_DOMAIN here too.

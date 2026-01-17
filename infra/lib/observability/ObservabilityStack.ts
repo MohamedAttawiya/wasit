@@ -206,8 +206,6 @@ export class ObservabilityStack extends cdk.Stack {
           },
           columns: [
             { name: "ts", type: "bigint" },
-            { name: "env", type: "string" },
-            { name: "service", type: "string" },
             { name: "level", type: "string" },
             { name: "correlationId", type: "string" },
             { name: "msg", type: "string" },
