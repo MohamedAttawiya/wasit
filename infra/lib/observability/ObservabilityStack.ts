@@ -6,10 +6,16 @@ import * as firehose from "aws-cdk-lib/aws-kinesisfirehose";
 import * as glue from "aws-cdk-lib/aws-glue";
 import * as athena from "aws-cdk-lib/aws-athena";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as path from "path";
 
 export interface ObservabilityStackProps extends cdk.StackProps {
-  prefix: string;
-  envName?: string; // default: "dev"
+  prefix: string; // e.g. "wasit-dev"
+}
+
+function inferStageFromPrefix(prefix: string): string {
+  const parts = String(prefix).toLowerCase().split("-");
+  return parts.length >= 2 ? parts[parts.length - 1] : "dev";
 }
 
 export class ObservabilityStack extends cdk.Stack {
@@ -24,7 +30,7 @@ export class ObservabilityStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
 
-    const envName = (props.envName ?? "dev").toLowerCase();
+    const envName = inferStageFromPrefix(props.prefix);
 
     // ---------- S3: durable log archive ----------
     this.logArchiveBucket = new s3.Bucket(this, "LogArchiveBucket", {
@@ -40,7 +46,7 @@ export class ObservabilityStack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
-    // ---------- Athena results bucket (keep separate from logs) ----------
+    // ---------- Athena results bucket ----------
     const athenaResultsBucket = new s3.Bucket(this, "AthenaResultsBucket", {
       bucketName: `${props.prefix}-athena-${this.account}-${this.region}`.toLowerCase(),
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -53,7 +59,7 @@ export class ObservabilityStack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
-    // ---------- Firehose role: can write to S3 ----------
+    // ---------- Firehose role ----------
     const firehoseRole = new iam.Role(this, "FirehoseRole", {
       assumedBy: new iam.ServicePrincipal("firehose.amazonaws.com"),
       description: "Allows Firehose to write log objects into the archive bucket",
@@ -67,56 +73,30 @@ export class ObservabilityStack extends cdk.Stack {
       })
     );
 
-    // ---------- Processor Lambda: gunzip CloudWatch payload -> NDJSON ----------
-    // CloudWatch Logs subscription payload arrives gzipped (binary). Athena needs text JSON.
-    const cwDecompressFn = new lambda.Function(this, "CwLogsDecompressFn", {
+    // ---------- Processor Lambda (asset-backed) ----------
+    const cwToNdjsonFn = new lambda.Function(this, "CwToNdjsonFn", {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 256,
-      code: lambda.Code.fromInline(`
-        const zlib = require("zlib");
-
-        exports.handler = async (event) => {
-          const records = event.records.map((r) => {
-            try {
-              const buf = Buffer.from(r.data, "base64");
-              const json = zlib.gunzipSync(buf).toString("utf8");
-
-              // Ensure NDJSON (one JSON object per line)
-              const out = json.endsWith("\\n") ? json : (json + "\\n");
-
-              return {
-                recordId: r.recordId,
-                result: "Ok",
-                data: Buffer.from(out, "utf8").toString("base64"),
-              };
-            } catch (e) {
-              return {
-                recordId: r.recordId,
-                result: "ProcessingFailed",
-                data: r.data,
-              };
-            }
-          });
-
-          return { records };
-        };
-      `),
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 512,
+      code: lambda.Code.fromAsset(path.join(__dirname, "..", "..", "lambda", "observability")),
+      environment: {
+        DEFAULT_ENV: envName,
+      },
     });
 
-    // Firehose must be allowed to invoke the processor Lambda
     firehoseRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["lambda:InvokeFunction", "lambda:GetFunctionConfiguration"],
-        resources: [cwDecompressFn.functionArn],
+        resources: [cwToNdjsonFn.functionArn],
       })
     );
 
-    // ---------- Firehose: DirectPut -> ExtendedS3 ----------
-    // Write NDJSON (optionally gzip the *file*, which Athena supports)
-    const prefix = `env=${envName}/service=unknown/date=!{timestamp:yyyy-MM-dd}/`;
-    const errorPrefix = `env=${envName}/service=unknown/error/date=!{timestamp:yyyy-MM-dd}/!{firehose:error-output-type}/`;
+    // ---------- Firehose ----------
+    const prefix =
+      "env=!{partitionKeyFromLambda:env}/service=!{partitionKeyFromLambda:service}/date=!{timestamp:yyyy-MM-dd}/";
+  const errorPrefix =
+    "error/date=!{timestamp:yyyy-MM-dd}/!{firehose:error-output-type}/";
 
     const streamName = `${props.prefix}-central-logs`.toLowerCase();
     this.logDeliveryStreamName = streamName;
@@ -129,27 +109,23 @@ export class ObservabilityStack extends cdk.Stack {
         roleArn: firehoseRole.roleArn,
         prefix,
         errorOutputPrefix: errorPrefix,
-
-        // ✅ file-level gzip is fine; content is text NDJSON after processor
         compressionFormat: "GZIP",
-
-        bufferingHints: { intervalInSeconds: 60, sizeInMBs: 5 },
-
+        bufferingHints: { intervalInSeconds: 60, sizeInMBs: 64 },
         processingConfiguration: {
           enabled: true,
           processors: [
             {
               type: "Lambda",
               parameters: [
-                { parameterName: "LambdaArn", parameterValue: cwDecompressFn.functionArn },
+                { parameterName: "LambdaArn", parameterValue: cwToNdjsonFn.functionArn },
                 { parameterName: "NumberOfRetries", parameterValue: "2" },
               ],
             },
-            {
-              type: "AppendDelimiterToRecord",
-              parameters: [{ parameterName: "Delimiter", parameterValue: "\\n" }],
-            },
           ],
+        },
+        dynamicPartitioningConfiguration: {
+          enabled: true,
+          retryOptions: { durationInSeconds: 300 },
         },
       },
     });
@@ -157,22 +133,50 @@ export class ObservabilityStack extends cdk.Stack {
     this.logDeliveryStreamArn = stream.attrArn;
 
     // ============================================================
-    // Glue / Athena (minimal, no crawler)
+    // SSM: publish well-known parameters for other stacks
     // ============================================================
+    const baseParamPath = `/${props.prefix}/observability`;
 
+    new ssm.StringParameter(this, "ObsFirehoseArnParam", {
+      parameterName: `${baseParamPath}/logDeliveryStreamArn`,
+      stringValue: this.logDeliveryStreamArn,
+      description: "Central logs Firehose delivery stream ARN",
+    });
+
+    new ssm.StringParameter(this, "ObsFirehoseNameParam", {
+      parameterName: `${baseParamPath}/logDeliveryStreamName`,
+      stringValue: this.logDeliveryStreamName,
+      description: "Central logs Firehose delivery stream name",
+    });
+
+    new ssm.StringParameter(this, "ObsLogBucketNameParam", {
+      parameterName: `${baseParamPath}/logArchiveBucketName`,
+      stringValue: this.logArchiveBucket.bucketName,
+      description: "Central logs archive bucket name",
+    });
+
+    new ssm.StringParameter(this, "ObsLogBucketArnParam", {
+      parameterName: `${baseParamPath}/logArchiveBucketArn`,
+      stringValue: this.logArchiveBucket.bucketArn,
+      description: "Central logs archive bucket ARN",
+    });
+
+    // ============================================================
+    // Glue / Athena
+    // ============================================================
     this.glueDatabaseName = `${props.prefix.replace(/[^a-zA-Z0-9_]/g, "_")}_logs`.toLowerCase();
 
     const db = new glue.CfnDatabase(this, "LogsDatabase", {
       catalogId: this.account,
       databaseInput: {
         name: this.glueDatabaseName,
-        description: "Wasit logs (CloudWatch subscription payloads -> NDJSON in S3)",
+        description: "Wasit logs (flattened log events as NDJSON in S3)",
       },
     });
 
-    this.glueTableName = "cw_subscription";
+    this.glueTableName = "log_events";
 
-    const table = new glue.CfnTable(this, "CwSubscriptionTable", {
+    const table = new glue.CfnTable(this, "LogEventsTable", {
       catalogId: this.account,
       databaseName: this.glueDatabaseName,
       tableInput: {
@@ -180,6 +184,7 @@ export class ObservabilityStack extends cdk.Stack {
         tableType: "EXTERNAL_TABLE",
         parameters: {
           classification: "json",
+          "ignore.malformed.json": "true",
           "projection.enabled": "false",
         },
         partitionKeys: [
@@ -191,10 +196,7 @@ export class ObservabilityStack extends cdk.Stack {
           location: `s3://${this.logArchiveBucket.bucketName}/`,
           inputFormat: "org.apache.hadoop.mapred.TextInputFormat",
           outputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-
-          // ✅ file-level gzip
           compressed: true,
-
           serdeInfo: {
             serializationLibrary: "org.openx.data.jsonserde.JsonSerDe",
             parameters: {
@@ -202,18 +204,15 @@ export class ObservabilityStack extends cdk.Stack {
               "case.insensitive": "true",
             },
           },
-
-          // Note: match JSON keys (your payload uses camelCase)
           columns: [
-            { name: "messageType", type: "string" },
-            { name: "owner", type: "string" },
-            { name: "logGroup", type: "string" },
-            { name: "logStream", type: "string" },
-            { name: "subscriptionFilters", type: "array<string>" },
-            {
-              name: "logEvents",
-              type: "array<struct<id:string,timestamp:bigint,message:string>>",
-            },
+            { name: "ts", type: "bigint" },
+            { name: "env", type: "string" },
+            { name: "service", type: "string" },
+            { name: "level", type: "string" },
+            { name: "correlationId", type: "string" },
+            { name: "msg", type: "string" },
+            { name: "details", type: "string" },
+            { name: "cw", type: "struct<logGroup:string,logStream:string,id:string,cwTimestamp:bigint>" },
           ],
         },
       },
@@ -235,32 +234,16 @@ export class ObservabilityStack extends cdk.Stack {
     });
 
     // ---------- Outputs ----------
-    new cdk.CfnOutput(this, "LogArchiveBucketName", {
-      value: this.logArchiveBucket.bucketName,
-    });
+    new cdk.CfnOutput(this, "LogArchiveBucketName", { value: this.logArchiveBucket.bucketName });
+    new cdk.CfnOutput(this, "LogArchiveBucketArn", { value: this.logArchiveBucket.bucketArn });
+    new cdk.CfnOutput(this, "CentralLogDeliveryStreamName", { value: this.logDeliveryStreamName });
+    new cdk.CfnOutput(this, "CentralLogDeliveryStreamArn", { value: this.logDeliveryStreamArn });
+    new cdk.CfnOutput(this, "AthenaResultsBucketName", { value: athenaResultsBucket.bucketName });
+    new cdk.CfnOutput(this, "GlueDatabaseName", { value: this.glueDatabaseName });
+    new cdk.CfnOutput(this, "GlueTableName", { value: this.glueTableName });
+    new cdk.CfnOutput(this, "AthenaWorkGroupName", { value: this.athenaWorkGroupName });
 
-    new cdk.CfnOutput(this, "CentralLogDeliveryStreamName", {
-      value: this.logDeliveryStreamName,
-    });
-
-    new cdk.CfnOutput(this, "CentralLogDeliveryStreamArn", {
-      value: this.logDeliveryStreamArn,
-    });
-
-    new cdk.CfnOutput(this, "AthenaResultsBucketName", {
-      value: athenaResultsBucket.bucketName,
-    });
-
-    new cdk.CfnOutput(this, "GlueDatabaseName", {
-      value: this.glueDatabaseName,
-    });
-
-    new cdk.CfnOutput(this, "GlueTableName", {
-      value: this.glueTableName,
-    });
-
-    new cdk.CfnOutput(this, "AthenaWorkGroupName", {
-      value: this.athenaWorkGroupName,
-    });
+    // Optional: output the base SSM path so humans know where to look
+    new cdk.CfnOutput(this, "ObservabilitySsmBasePath", { value: baseParamPath });
   }
 }

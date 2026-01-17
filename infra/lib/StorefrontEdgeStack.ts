@@ -1,3 +1,4 @@
+// lib/StorefrontEdgeStack.ts
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
@@ -12,8 +13,10 @@ import * as iam from "aws-cdk-lib/aws-iam";
 
 export interface StorefrontEdgeStackProps extends cdk.StackProps {
   tenantApiUrl: string;
-  certificateArn?: string; // OPTIONAL for Phase 1
-  domainNames?: string[]; // OPTIONAL for Phase 1
+
+  // ✅ Real DNS + TLS phase
+  certificateArn?: string;
+  domainNames?: string[];
 
   // ✅ Observability wiring (explicit)
   logDeliveryStreamArn: string; // from ObservabilityStack output
@@ -26,6 +29,7 @@ export class StorefrontEdgeStack extends cdk.Stack {
 
     const envName = (props.envName ?? "dev").toLowerCase();
 
+    // ---------------- SSR Lambda ----------------
     const ssrFn = new nodeLambda.NodejsFunction(this, "StorefrontSsrFn", {
       runtime: lambda.Runtime.NODEJS_20_X,
       entry: "lambda/storefront-ssr/index.ts",
@@ -39,47 +43,54 @@ export class StorefrontEdgeStack extends cdk.Stack {
       },
     });
 
-// ---------------- Observability: CloudWatch Logs -> Firehose (L1) ----------------
-const cwLogsToFirehoseRole = new iam.Role(this, "CwLogsToFirehoseRole", {
-  assumedBy: new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`),
-  description: "Allows CloudWatch Logs subscription filter to write into Firehose",
-});
+    // ---------------- Observability: CloudWatch Logs -> Firehose (L1) ----------------
+    // CloudWatch Logs service principal is region-scoped
+    const cwLogsToFirehoseRole = new iam.Role(this, "CwLogsToFirehoseRole", {
+      assumedBy: new iam.ServicePrincipal(`logs.${this.region}.amazonaws.com`),
+      description:
+        "Allows CloudWatch Logs subscription filter to write into Firehose",
+    });
 
-const policy = new iam.Policy(this, "CwLogsToFirehosePolicy", {
-  statements: [
-    new iam.PolicyStatement({
-      actions: [
-        "firehose:PutRecord",
-        "firehose:PutRecordBatch",
-        "firehose:DescribeDeliveryStream",
-      ],
-      resources: [props.logDeliveryStreamArn],
-    }),
-  ],
-});
-policy.attachToRole(cwLogsToFirehoseRole);
+    const cwLogsToFirehosePolicy = new iam.Policy(
+      this,
+      "CwLogsToFirehosePolicy",
+      {
+        statements: [
+          new iam.PolicyStatement({
+            actions: [
+              "firehose:PutRecord",
+              "firehose:PutRecordBatch",
+              "firehose:DescribeDeliveryStream",
+            ],
+            resources: [props.logDeliveryStreamArn],
+          }),
+        ],
+      }
+    );
+    cwLogsToFirehosePolicy.attachToRole(cwLogsToFirehoseRole);
 
-const ssrLogGroupName = `/aws/lambda/${ssrFn.functionName}`;
+    const ssrLogGroupName = `/aws/lambda/${ssrFn.functionName}`;
 
-const sub = new logs.CfnSubscriptionFilter(this, "SsrLogsToFirehose", {
-  logGroupName: ssrLogGroupName,
-  destinationArn: props.logDeliveryStreamArn,
-  roleArn: cwLogsToFirehoseRole.roleArn,
-  filterPattern: "",
-});
+    const sub = new logs.CfnSubscriptionFilter(this, "SsrLogsToFirehose", {
+      logGroupName: ssrLogGroupName,
+      destinationArn: props.logDeliveryStreamArn,
+      roleArn: cwLogsToFirehoseRole.roleArn,
+      filterPattern: "",
+    });
 
-// ✅ Force ordering: policy MUST exist before the subscription filter test fires
-sub.node.addDependency(policy);
-sub.node.addDependency(cwLogsToFirehoseRole);
+    // ✅ Force ordering: role + policy MUST exist before CW Logs tests subscription
+    sub.node.addDependency(cwLogsToFirehosePolicy);
+    sub.node.addDependency(cwLogsToFirehoseRole);
 
-    // ---------------- Existing infra (unchanged) ----------------
+    // ---------------- Lambda Function URL origin ----------------
     const fnUrl = ssrFn.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
     });
 
-    // Cache varies per hostname; do NOT cache across stores
+    // ---------------- CloudFront policies ----------------
+    // ✅ Don’t cache across stores; keep it zero TTL for now
     const cachePolicy = new cloudfront.CachePolicy(this, "NoHostCachePolicy", {
-      headerBehavior: cloudfront.CacheHeaderBehavior.none(), // ✅ important
+      headerBehavior: cloudfront.CacheHeaderBehavior.none(),
       queryStringBehavior: cloudfront.CacheQueryStringBehavior.none(),
       cookieBehavior: cloudfront.CacheCookieBehavior.none(),
       defaultTtl: cdk.Duration.seconds(0),
@@ -87,8 +98,8 @@ sub.node.addDependency(cwLogsToFirehoseRole);
       minTtl: cdk.Duration.seconds(0),
     });
 
-    // ✅ DO NOT forward Host to a Lambda Function URL origin.
-    // Instead, forward a safe header we set at the edge: x-forwarded-host
+    // ✅ DO NOT forward Host to Lambda Function URL origin.
+    // Forward only safe headers we control.
     const originRequestPolicy = new cloudfront.OriginRequestPolicy(
       this,
       "ForwardTenantHeaders",
@@ -102,7 +113,7 @@ sub.node.addDependency(cwLogsToFirehoseRole);
       }
     );
 
-    // ✅ CloudFront Function: copy viewer Host into x-forwarded-host
+    // ✅ CloudFront Function: copy viewer Host into x-forwarded-host (unless already provided)
     const addForwardedHostFn = new cloudfront.Function(
       this,
       "AddXForwardedHostV2",
@@ -112,12 +123,11 @@ sub.node.addDependency(cwLogsToFirehoseRole);
 function handler(event) {
   var req = event.request;
 
-  // If caller already provided x-forwarded-host (useful for Phase 0 testing), keep it.
+  // Keep explicit x-forwarded-host (useful for early header-based tests)
   if (req.headers["x-forwarded-host"] && req.headers["x-forwarded-host"].value) {
     return req;
   }
 
-  // Otherwise derive from viewer Host (real DNS+cert phase)
   var h = req.headers.host && req.headers.host.value ? req.headers.host.value : "";
   if (h) {
     req.headers["x-forwarded-host"] = { value: h };
@@ -125,19 +135,20 @@ function handler(event) {
 
   return req;
 }
-        `.trim()
+          `.trim()
         ),
       }
     );
 
+    // Function URL looks like: https://abcde.lambda-url.eu-central-1.on.aws/
+    const fnUrlHost = cdk.Fn.select(2, cdk.Fn.split("/", fnUrl.url));
+
+    // ---------------- CloudFront distribution ----------------
     const distribution = new cloudfront.Distribution(this, "StorefrontDist", {
       defaultBehavior: {
-        origin: new origins.HttpOrigin(
-          cdk.Fn.select(2, cdk.Fn.split("/", fnUrl.url)),
-          {
-            protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-          }
-        ),
+        origin: new origins.HttpOrigin(fnUrlHost, {
+          protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+        }),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy,
         originRequestPolicy,
@@ -149,7 +160,7 @@ function handler(event) {
         ],
       },
 
-      // Only applied if provided
+      // ✅ Applied only when provided (real DNS + TLS phase)
       domainNames: props.domainNames,
       certificate: props.certificateArn
         ? acm.Certificate.fromCertificateArn(
@@ -166,7 +177,6 @@ function handler(event) {
       value: distribution.distributionDomainName,
     });
 
-    // Helpful for debugging wiring
     new cdk.CfnOutput(this, "StorefrontSsrLogGroupName", {
       value: ssrLogGroupName,
     });
