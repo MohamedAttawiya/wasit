@@ -5,6 +5,7 @@ import { ObservabilityStack } from "../lib/observability/ObservabilityStack";
 import { TenantDomainsStack } from "../lib/domains/TenantDomainsStack";
 import { TenantServiceStack } from "../lib/domains/TenantServiceStack";
 import { StorefrontEdgeStack } from "../lib/domains/StorefrontEdgeStack";
+import { AuthControlPlaneStack } from "../lib/auth/AuthControlPlaneStack";
 //import { PlatformDomainsStack } from "../lib/domains/PlatformDomainsStack";
 
 const app = new cdk.App();
@@ -64,6 +65,17 @@ new StorefrontEdgeStack(app, `${PREFIX}-storefront-edge`, {
   tenantHostedZone: tenantDomains.tenantZone,
   domainRecordName: "*",
 });
+
+new AuthControlPlaneStack(app, `${PREFIX}-auth-controlplane`, {
+  env: envEU,
+  prefix: PREFIX,
+  googleSecretName: `${PREFIX}/google-oauth`,
+  createGoogleSecretIfMissing: false,
+  enableGoogleIdp: true, // IMPORTANT for now
+  callbackUrls: ["http://localhost:3000/auth/callback"],
+  logoutUrls: ["http://localhost:3000/"],
+});
+
 
 // new PlatformDomainsStack(app, `${PREFIX}-platform-domains`, {
 //   env: envEU,
