@@ -10,6 +10,7 @@ import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations"
 import * as apigwv2Auth from "aws-cdk-lib/aws-apigatewayv2-authorizers";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as iam from "aws-cdk-lib/aws-iam";
+import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 
 export interface AuthControlPlaneStackProps extends cdk.StackProps {
   prefix: string;
@@ -36,7 +37,10 @@ export class AuthControlPlaneStack extends cdk.Stack {
   public readonly webClient: cognito.UserPoolClient;
   public readonly usersStateTable: ddb.Table;
   public readonly authzGrantsTable: ddb.Table;
-  public readonly controlPlaneFn: lambda.Function;
+
+  // NOTE: keep type as lambda.IFunction so NodejsFunction is acceptable
+  public readonly controlPlaneFn: lambda.IFunction;
+
   public readonly httpApi: apigwv2.HttpApi;
 
   public readonly issuer: string;
@@ -241,17 +245,31 @@ export class AuthControlPlaneStack extends cdk.Stack {
 
     // ----------------------------
     // Control-plane Lambda (routes: /admin/*)
+    // Bundled via NodejsFunction so it can import @wasit/authz (workspace package)
     // ----------------------------
-    this.controlPlaneFn = new lambda.Function(this, "AuthControlPlaneFn", {
+    this.controlPlaneFn = new NodejsFunction(this, "AuthControlPlaneFn", {
       runtime: lambda.Runtime.NODEJS_20_X,
-      handler: "index.handler",
-      code: lambda.Code.fromAsset(path.join(__dirname, "../../lambda/auth")),
+
+      // IMPORTANT: points to your JS entry (ESM-friendly) and bundles deps.
+      entry: path.join(__dirname, "../../lambda/auth/index.js"),
+      handler: "handler",
+
       timeout: cdk.Duration.seconds(15),
       memorySize: 256,
+
       environment: {
         USER_POOL_ID: this.userPool.userPoolId,
         USERS_STATE_TABLE: this.usersStateTable.tableName,
         AUTHZ_GRANTS_TABLE: this.authzGrantsTable.tableName,
+      },
+
+      bundling: {
+        // Bundle everything including @wasit/authz and AWS SDK v3 deps
+        externalModules: [],
+        format: OutputFormat.ESM,
+        target: "node20",
+        sourceMap: true,
+        minify: false,
       },
     });
 
@@ -303,10 +321,15 @@ export class AuthControlPlaneStack extends cdk.Stack {
       });
     };
 
-    add("/admin/users", apigwv2.HttpMethod.POST);
-    add("/admin/users/{userId}/state", apigwv2.HttpMethod.PATCH);
-    add("/admin/grants", apigwv2.HttpMethod.POST);
-    add("/admin/grants", apigwv2.HttpMethod.DELETE);
+add("/admin/users", apigwv2.HttpMethod.POST);
+add("/admin/users", apigwv2.HttpMethod.GET);
+
+add("/admin/users/{userId}", apigwv2.HttpMethod.GET);
+add("/admin/users/{userId}/state", apigwv2.HttpMethod.PATCH);
+
+add("/admin/grants", apigwv2.HttpMethod.POST);
+add("/admin/grants", apigwv2.HttpMethod.GET);
+add("/admin/grants", apigwv2.HttpMethod.DELETE);
 
     // ----------------------------
     // Outputs

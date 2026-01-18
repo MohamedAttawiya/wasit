@@ -1,6 +1,10 @@
 {
   "name": "infra",
   "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "infra": "bin/infra.js"
   },
@@ -24,6 +28,7 @@
     "@aws-sdk/client-dynamodb": "^3.968.0",
     "@aws-sdk/lib-dynamodb": "^3.968.0",
     "aws-cdk-lib": "^2.232.1",
-    "constructs": "^10.4.4"
+    "constructs": "^10.4.4",
+    "@wasit/authz": "workspace:*"
   }
 }
