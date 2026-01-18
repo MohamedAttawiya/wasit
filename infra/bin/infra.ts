@@ -8,6 +8,7 @@ import { StorefrontEdgeStack } from "../lib/domains/StorefrontEdgeStack";
 import { AuthControlPlaneStack } from "../lib/auth/AuthControlPlaneStack";
 import { PlatformDomainsStack } from "../lib/domains/PlatformDomainsStack";
 import { PlatformEdgeStack } from "../lib/domains/PlatformEdgeStack";
+import { AuthzSmokeStack } from "../lib/auth/AuthzSmokeStack";
 
 const app = new cdk.App();
 
@@ -69,12 +70,24 @@ new StorefrontEdgeStack(app, `${PREFIX}-storefront-edge`, {
 new AuthControlPlaneStack(app, `${PREFIX}-auth-controlplane`, {
   env: envEU,
   prefix: PREFIX,
+
   googleSecretName: `${PREFIX}/google-oauth`,
   createGoogleSecretIfMissing: false,
-  enableGoogleIdp: true, // IMPORTANT for now
-  callbackUrls: ["http://localhost:3000/auth/callback"],
-  logoutUrls: ["http://localhost:3000/"],
+
+  // ✅ Turn off Google until native flow works
+  enableGoogleIdp: false,
+
+  // ✅ Redirect back to your CloudFront-hosted tester UI
+  callbackUrls: ["https://d3g6c5f817lxm9.cloudfront.net/index.html"],
+  logoutUrls: ["https://d3g6c5f817lxm9.cloudfront.net/index.html"],
 });
+
+if (STAGE === "dev") {
+  new AuthzSmokeStack(app, `${PREFIX}-authz-smoke`, {
+    env: envEU,
+    prefix: PREFIX,
+  });
+}
 
 // Platform domains (OFF for now)
 // Creates platform frontend bucket only (no hosted zone, no cert, no DNS wiring).
@@ -93,8 +106,6 @@ new PlatformEdgeStack(app, `${PREFIX}-platform-edge`, {
   env: envEU,
   stage: STAGE,
   platformFrontendBucketName: platformDomains.platformFrontendBucket.bucketName,
-
-  // Only wire custom domain if the cert exists (toggle ON)
   domainNames: platformDomains.platformCertArn
     ? [PLATFORM_DOMAIN, ...PLATFORM_SUBDOMAINS.map((s) => `${s}.${PLATFORM_DOMAIN}`)]
     : undefined,

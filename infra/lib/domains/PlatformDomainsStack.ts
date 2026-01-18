@@ -7,12 +7,11 @@ import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as path from "path";
 
-
 export interface PlatformDomainsStackProps extends cdk.StackProps {
   stage: string;
 
-  platformDomain: string;         // e.g. "wasit.eg"
-  platformSubdomains?: string[];  // e.g. ["api","admin","god"]
+  platformDomain: string; // e.g. "wasit.eg"
+  platformSubdomains?: string[]; // e.g. ["api","admin","god"]
 
   enablePlatformCustomDomain?: boolean;
 }
@@ -30,9 +29,7 @@ export class PlatformDomainsStack extends cdk.Stack {
     const stage = (props.stage ?? "dev").toLowerCase();
     const enable = props.enablePlatformCustomDomain ?? false;
 
-    // -----------------------------
-    // Always: Platform frontend bucket
-    // -----------------------------
+    // Always: platform frontend bucket
     this.platformFrontendBucket = new s3.Bucket(this, "PlatformFrontendBucket", {
       bucketName: `wasit-${stage}-platform-frontend-${this.account}-${this.region}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -44,15 +41,11 @@ export class PlatformDomainsStack extends cdk.Stack {
       autoDeleteObjects: stage === "prod" ? false : true,
     });
 
+    // Auto-upload local platform-frontend -> S3 on deploy
     new s3deploy.BucketDeployment(this, "DeployPlatformFrontend", {
-  destinationBucket: this.platformFrontendBucket,
-  sources: [
-    s3deploy.Source.asset(
-      path.join(__dirname, "../../../platform-frontend")
-    ),
-  ],
-});
-
+      destinationBucket: this.platformFrontendBucket,
+      sources: [s3deploy.Source.asset(path.join(__dirname, "../../../platform-frontend"))],
+    });
 
     new cdk.CfnOutput(this, "PlatformFrontendBucketName", {
       value: this.platformFrontendBucket.bucketName,
@@ -67,18 +60,13 @@ export class PlatformDomainsStack extends cdk.Stack {
       return;
     }
 
-    // -----------------------------
-    // Hosted Zone (main region)
-    // -----------------------------
+    // Hosted Zone (only when enabled)
     const zone = new route53.PublicHostedZone(this, "PlatformZone", {
       zoneName: props.platformDomain,
     });
     this.platformZone = zone;
 
-    // -----------------------------
-    // Certificate (MUST be us-east-1 for CloudFront)
-    // Uses DNS validation in the zone above.
-    // -----------------------------
+    // Certificate MUST be us-east-1 for CloudFront
     const altNames =
       props.platformSubdomains?.map((s) => `${s}.${props.platformDomain}`) ?? [];
 
@@ -88,12 +76,8 @@ export class PlatformDomainsStack extends cdk.Stack {
       hostedZone: zone,
       region: "us-east-1",
     });
-
     this.platformCertArn = cert.certificateArn;
 
-    // -----------------------------
-    // Outputs
-    // -----------------------------
     new cdk.CfnOutput(this, "PlatformCustomDomainEnabled", {
       value: "true",
       exportName: `wasit-${stage}-platform-custom-domain-enabled`,

@@ -49,6 +49,7 @@ export class PlatformEdgeStack extends cdk.Stack {
         compress: true,
       },
 
+      // Switchable: undefined => orphan cloudfront.net distro
       domainNames: props.domainNames?.length ? props.domainNames : undefined,
       certificate: props.certificateArn
         ? acm.Certificate.fromCertificateArn(this, "PlatformCert", props.certificateArn)
@@ -56,6 +57,8 @@ export class PlatformEdgeStack extends cdk.Stack {
 
       comment: `Wasit platform admin UI (${stage})`,
 
+      // SPA fallback (optional)
+      defaultRootObject: "index.html",
       errorResponses: spaFallback
         ? [
             {
@@ -76,6 +79,31 @@ export class PlatformEdgeStack extends cdk.Stack {
 
     this.distributionDomainName = distribution.distributionDomainName;
 
+    // ---- CRITICAL: explicit bucket policy for OAC ----
+    // Because the bucket is imported by name, CDK can't auto-attach the bucket policy.
+    // This policy allows only this CloudFront distribution to read objects.
+    new s3.CfnBucketPolicy(this, "PlatformBucketPolicyForOAC", {
+      bucket: props.platformFrontendBucketName,
+      policyDocument: {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Sid: "AllowCloudFrontReadViaOAC",
+            Effect: "Allow",
+            Principal: { Service: "cloudfront.amazonaws.com" },
+            Action: "s3:GetObject",
+            Resource: `arn:aws:s3:::${props.platformFrontendBucketName}/*`,
+            Condition: {
+              StringEquals: {
+                "AWS:SourceArn": `arn:aws:cloudfront::${this.account}:distribution/${distribution.distributionId}`,
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    // Optional DNS wiring (only if you own/manage the domain)
     if (props.platformHostedZone && props.domainNames?.length) {
       for (const dn of props.domainNames) {
         const zoneName = props.platformHostedZone.zoneName.replace(/\.$/, "");

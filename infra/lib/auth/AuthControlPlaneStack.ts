@@ -77,10 +77,6 @@ export class AuthControlPlaneStack extends cdk.Stack {
       );
     }
 
-    // NOTE:
-    // Do NOT read secret values unless enableGoogleIdp=true.
-    // Otherwise CDK may try to synth SecretValue into template and fail validation.
-
     // ----------------------------
     // Cognito User Pool
     // ----------------------------
@@ -89,7 +85,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
       signInAliases: { email: true },
       selfSignUpEnabled: false,
       standardAttributes: {
-        email: { required: true, mutable: false },
+        email: { required: true, mutable: true }, // admin-facing ID; keep mutable=true for now
         fullname: { required: false, mutable: true },
       },
       passwordPolicy: {
@@ -103,11 +99,14 @@ export class AuthControlPlaneStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // User types via groups
-    new cognito.CfnUserPoolGroup(this, "GodAdminGroup", {
+    // ----------------------------
+    // Groups (rename away from "GodAdmin")
+    // ----------------------------
+    // Top group: "PlatformAdmin" (powerful, non-sacrilegious)
+    new cognito.CfnUserPoolGroup(this, "PlatformAdminGroup", {
       userPoolId: this.userPool.userPoolId,
-      groupName: "GodAdmin",
-      description: "Full platform control",
+      groupName: "PlatformAdmin",
+      description: "Full platform control (root)",
     });
 
     new cognito.CfnUserPoolGroup(this, "InternalOpsGroup", {
@@ -123,7 +122,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
     });
 
     // ----------------------------
-    // AWS-provided Cognito domain (Hosted UI) — fastest path
+    // AWS-provided Cognito domain (Hosted UI)
     // ----------------------------
     const domainPrefix =
       props.cognitoDomainPrefix ??
@@ -144,11 +143,11 @@ export class AuthControlPlaneStack extends cdk.Stack {
 
     // ----------------------------
     // Optional: Google Identity Provider
-    // ONLY enable once you have real clientId/secret
     // ----------------------------
     let googleProvider: cognito.CfnUserPoolIdentityProvider | undefined;
 
     if (enableGoogleIdp) {
+      // NOTE: Do NOT read secret values unless enableGoogleIdp=true.
       const googleClientId = googleSecret
         .secretValueFromJson("clientId")
         .unsafeUnwrap();
@@ -179,8 +178,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
     }
 
     // ----------------------------
-    // User Pool Client (OAuth code grant for web apps)
-    // While Google isn't enabled, allow Cognito native sign-in.
+    // User Pool Client (OAuth)
     // ----------------------------
     const supportedProviders: cognito.UserPoolClientIdentityProvider[] = [
       cognito.UserPoolClientIdentityProvider.COGNITO,
@@ -194,7 +192,10 @@ export class AuthControlPlaneStack extends cdk.Stack {
       userPoolClientName: `${prefix}-web`,
       generateSecret: false,
       oAuth: {
-        flows: { authorizationCodeGrant: true },
+        flows: {
+          authorizationCodeGrant: true,
+          implicitCodeGrant: true, // fine for testing; remove later if you want
+        },
         scopes: [
           cognito.OAuthScope.OPENID,
           cognito.OAuthScope.EMAIL,
@@ -208,9 +209,9 @@ export class AuthControlPlaneStack extends cdk.Stack {
 
     // Ensure client waits for IdP when enabled
     if (googleProvider) {
-      (this.webClient.node.defaultChild as cognito.CfnUserPoolClient).addDependency(
-        googleProvider
-      );
+      (
+        this.webClient.node.defaultChild as cognito.CfnUserPoolClient
+      ).addDependency(googleProvider);
     }
 
     // ----------------------------
@@ -225,7 +226,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
     });
 
     // ----------------------------
-    // DynamoDB: authz_grants (authorization graph)
+    // DynamoDB: authz_grants
     // ----------------------------
     this.authzGrantsTable = new ddb.Table(this, "AuthzGrantsTable", {
       tableName: props.authzGrantsTableName ?? "authz_grants",
@@ -245,26 +246,22 @@ export class AuthControlPlaneStack extends cdk.Stack {
 
     // ----------------------------
     // Control-plane Lambda (routes: /admin/*)
-    // Bundled via NodejsFunction so it can import @wasit/authz (workspace package)
     // ----------------------------
     this.controlPlaneFn = new NodejsFunction(this, "AuthControlPlaneFn", {
       runtime: lambda.Runtime.NODEJS_20_X,
-
-      // IMPORTANT: points to your JS entry (ESM-friendly) and bundles deps.
       entry: path.join(__dirname, "../../lambda/auth/index.js"),
       handler: "handler",
-
       timeout: cdk.Duration.seconds(15),
       memorySize: 256,
-
       environment: {
         USER_POOL_ID: this.userPool.userPoolId,
         USERS_STATE_TABLE: this.usersStateTable.tableName,
         AUTHZ_GRANTS_TABLE: this.authzGrantsTable.tableName,
+        // IMPORTANT: align with your Lambda enforcement
+        // (i.e., requireGroup(principal, "PlatformAdmin"))
+        PLATFORM_ADMIN_GROUP: "PlatformAdmin",
       },
-
       bundling: {
-        // Bundle everything including @wasit/authz and AWS SDK v3 deps
         externalModules: [],
         format: OutputFormat.ESM,
         target: "node20",
@@ -299,6 +296,24 @@ export class AuthControlPlaneStack extends cdk.Stack {
     // ----------------------------
     this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
       apiName: `${prefix}-auth-control-plane`,
+      corsPreflight: {
+        allowHeaders: ["authorization", "content-type", "x-correlation-id"],
+        allowMethods: [
+          apigwv2.CorsHttpMethod.GET,
+          apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PATCH,
+          apigwv2.CorsHttpMethod.DELETE,
+          apigwv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowOrigins: [
+          "http://localhost:3000",
+          "http://localhost:5173",
+          // Your platform CloudFront domain
+          "https://d3g6c5f817lxm9.cloudfront.net",
+        ],
+        allowCredentials: false,
+        maxAge: cdk.Duration.hours(1),
+      },
     });
 
     const integration = new apigwv2Integrations.HttpLambdaIntegration(
@@ -321,15 +336,26 @@ export class AuthControlPlaneStack extends cdk.Stack {
       });
     };
 
-add("/admin/users", apigwv2.HttpMethod.POST);
-add("/admin/users", apigwv2.HttpMethod.GET);
+    // ----------------------------
+    // Routes (deduped, authoritative)
+    // ----------------------------
 
-add("/admin/users/{userId}", apigwv2.HttpMethod.GET);
-add("/admin/users/{userId}/state", apigwv2.HttpMethod.PATCH);
+    // Users
+    add("/admin/users", apigwv2.HttpMethod.POST); // create user (by email)
+    add("/admin/users", apigwv2.HttpMethod.GET); // list users
+    add("/admin/users/{userId}", apigwv2.HttpMethod.GET); // get user by sub (future-safe)
+    add("/admin/users/{userId}/state", apigwv2.HttpMethod.PATCH); // update UsersState (future)
 
-add("/admin/grants", apigwv2.HttpMethod.POST);
-add("/admin/grants", apigwv2.HttpMethod.GET);
-add("/admin/grants", apigwv2.HttpMethod.DELETE);
+    // Roles / access (admin-only, enforced in Lambda)
+    add("/admin/users/role", apigwv2.HttpMethod.PATCH); // set role by email
+
+    // Grants
+    add("/admin/grants", apigwv2.HttpMethod.POST);
+    add("/admin/grants", apigwv2.HttpMethod.GET);
+    add("/admin/grants", apigwv2.HttpMethod.DELETE);
+
+    // Debug
+    add("/admin/_debug", apigwv2.HttpMethod.GET);
 
     // ----------------------------
     // Outputs
@@ -374,6 +400,7 @@ add("/admin/grants", apigwv2.HttpMethod.DELETE);
       exportName: `${prefix}-control-plane-api-url`,
     });
 
+    // IMPORTANT: Fix the unterminated string bug you hit earlier
     new cdk.CfnOutput(this, "Auth_GoogleIdpEnabled", {
       value: enableGoogleIdp ? "true" : "false",
       exportName: `${prefix}-auth-google-enabled`,

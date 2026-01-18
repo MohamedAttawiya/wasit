@@ -1,22 +1,21 @@
 {
   "name": "@wasit/authz",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.0.0",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "files": ["dist"],
-  "exports": {
-    ".": "./src/index.ts"
-  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
-  },
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.500.0",
-    "@aws-sdk/util-dynamodb": "^3.500.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.0.0"
+  "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+  "build": "npm run clean && tsc -p tsconfig.json"
+},
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./grants": {
+      "types": "./dist/grants.d.ts",
+      "default": "./dist/grants.js"
+    }
   }
 }

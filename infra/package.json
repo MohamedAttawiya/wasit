@@ -25,10 +25,12 @@
     "typescript": "~5.9.3"
   },
   "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.971.0",
     "@aws-sdk/client-dynamodb": "^3.968.0",
     "@aws-sdk/lib-dynamodb": "^3.968.0",
+    "@wasit/authz": "workspace:*",
     "aws-cdk-lib": "^2.232.1",
-    "constructs": "^10.4.4",
-    "@wasit/authz": "workspace:*"
+    "aws4fetch": "^1.0.20",
+    "constructs": "^10.4.4"
   }
 }
