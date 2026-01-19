@@ -1,38 +1,182 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <title>Wasit Platform</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      body {
-        margin: 0;
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-          Roboto, sans-serif;
-        background: #0f172a;
-        color: #e5e7eb;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 100vh;
-      }
-      .box {
-        text-align: center;
-      }
-      .badge {
-        margin-top: 12px;
-        font-size: 12px;
-        opacity: 0.7;
-      }
-    </style>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Wasit Admin</title>
+    <link rel="stylesheet" href="css/styles.css" />
   </head>
-  <body>
-    <div class="box">
-      <h1>Wasit Platform</h1>
-      <p>Platform edge is live.</p>
-      <div class="badge" id="env"></div>
-    </div>
 
-    <script src="/js/main.js"></script>
+  <body>
+    <div id="app"></div>
+
+    <script type="module">
+      import {
+        getSession,
+        loginUrl,
+        logout,
+        readTokensFromHashAndPersist,
+        renderShell,
+      } from "./js/auth.js";
+
+      readTokensFromHashAndPersist();
+      let session = getSession();
+
+      const params = new URLSearchParams(window.location.search);
+      const flash = params.get("msg");
+      if (params.has("msg")) {
+        params.delete("msg");
+        const clean = params.toString();
+        const path = window.location.pathname + (clean ? `?${clean}` : "");
+        history.replaceState(null, "", path);
+      }
+
+      const { main } = renderShell({
+        session,
+        heading: "Wasit Admin",
+        subheading: "Cognito-protected admin pages with role-based access.",
+        message: flash,
+      });
+
+      const welcome = document.createElement("div");
+      welcome.className = "card";
+
+      const welcomeTitle = document.createElement("h2");
+      welcomeTitle.textContent = "Home";
+      welcome.appendChild(welcomeTitle);
+
+      const welcomeCopy = document.createElement("p");
+      welcomeCopy.textContent = "Sign in with the Cognito Hosted UI and choose the area that matches your role.";
+      welcome.appendChild(welcomeCopy);
+
+      const ctaRow = document.createElement("div");
+      ctaRow.className = "nav-buttons";
+
+      const loginBtn = document.createElement("a");
+      loginBtn.href = "#";
+
+loginUrl()
+  .then((u) => {
+    loginBtn.href = u;
+  })
+  .catch((e) => {
+    console.error("Failed to build login URL (auth.json fetch/build likely failed):", e);
+    loginBtn.href = "/index.html";
+    loginBtn.title = `Login URL build failed: ${String(e?.message || e)}`;
+    loginBtn.textContent = "Login (config error)";
+  });
+
+      loginBtn.className = "btn btn-primary";
+      loginBtn.textContent = "Login";
+      loginBtn.rel = "noreferrer";
+      ctaRow.appendChild(loginBtn);
+
+      if (session.loggedIn) {
+        const logoutBtn = document.createElement("button");
+        logoutBtn.type = "button";
+        logoutBtn.className = "btn btn-ghost";
+        logoutBtn.textContent = "Logout";
+        logoutBtn.addEventListener("click", logout);
+        ctaRow.appendChild(logoutBtn);
+      }
+
+      welcome.appendChild(ctaRow);
+      main.appendChild(welcome);
+
+      const navCard = document.createElement("div");
+      navCard.className = "card nav-card";
+
+      const navTitle = document.createElement("h2");
+      navTitle.textContent = "Role pages";
+      navCard.appendChild(navTitle);
+
+      const navGrid = document.createElement("div");
+      navGrid.className = "grid";
+
+      [
+        { title: "Platform Admin", role: "PlatformAdmin", href: "platform-admin.html", desc: "Full platform control for administrators." },
+        { title: "Seller", role: "Seller", href: "seller.html", desc: "Seller tooling and dashboards." },
+        { title: "Internal Ops", role: "InternalOps", href: "internal-ops.html", desc: "Internal operations views and workflows." },
+      ].forEach(({ title, role, href, desc }) => {
+        const card = document.createElement("div");
+        card.className = "card";
+
+        const h3 = document.createElement("h3");
+        h3.textContent = title;
+        card.appendChild(h3);
+
+        const p = document.createElement("p");
+        p.textContent = desc;
+        card.appendChild(p);
+
+        const meta = document.createElement("div");
+        meta.className = "small-label";
+        meta.textContent = `${role} role required`;
+        card.appendChild(meta);
+
+        const action = document.createElement("a");
+        action.href = href;
+        action.className = "btn";
+        action.textContent = "Open page";
+        card.appendChild(action);
+
+        navGrid.appendChild(card);
+      });
+
+      navCard.appendChild(navGrid);
+      main.appendChild(navCard);
+
+      const sessionCard = document.createElement("div");
+      sessionCard.className = "card";
+
+      const sessionTitle = document.createElement("h2");
+      sessionTitle.textContent = "Session";
+      sessionCard.appendChild(sessionTitle);
+
+      const statusWrap = document.createElement("div");
+      statusWrap.className = "status";
+
+      const stateBox = document.createElement("div");
+      const stateLabel = document.createElement("div");
+      stateLabel.className = "small-label";
+      stateLabel.textContent = "Status";
+      const stateValue = document.createElement("div");
+      stateValue.className = "badge";
+      stateValue.textContent = session.loggedIn ? "Logged in" : "Logged out";
+      stateBox.appendChild(stateLabel);
+      stateBox.appendChild(stateValue);
+      statusWrap.appendChild(stateBox);
+
+      const emailBox = document.createElement("div");
+      const emailLabel = document.createElement("div");
+      emailLabel.className = "small-label";
+      emailLabel.textContent = "Email";
+      const emailValue = document.createElement("div");
+      emailValue.textContent = session.email || "-";
+      emailBox.appendChild(emailLabel);
+      emailBox.appendChild(emailValue);
+      statusWrap.appendChild(emailBox);
+
+      const groupsBox = document.createElement("div");
+      const groupsLabel = document.createElement("div");
+      groupsLabel.className = "small-label";
+      groupsLabel.textContent = "Groups";
+      groupsBox.appendChild(groupsLabel);
+
+      const groupsValue = document.createElement("div");
+      groupsValue.className = "mono";
+      groupsValue.textContent = session.groups.length ? session.groups.join(", ") : "-";
+      groupsBox.appendChild(groupsValue);
+
+      statusWrap.appendChild(groupsBox);
+      sessionCard.appendChild(statusWrap);
+
+      const apiNote = document.createElement("p");
+      apiNote.className = "muted";
+      apiNote.textContent = "ID token is used for Authorization header and role detection.";
+      sessionCard.appendChild(apiNote);
+
+      main.appendChild(sessionCard);
+    </script>
   </body>
 </html>

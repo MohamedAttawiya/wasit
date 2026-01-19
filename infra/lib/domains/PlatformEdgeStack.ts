@@ -12,18 +12,13 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 
 export interface PlatformEdgeStackProps extends cdk.StackProps {
   stage: string;
-
-  // IMPORTANT: pass NAME only to avoid cross-stack cycles
   platformFrontendBucketName: string;
-
-  // Optional: only when you own the domain
   domainNames?: string[];
   certificateArn?: string;
-
   platformHostedZone?: route53.IHostedZone;
-
   spaFallbackToIndex?: boolean;
 }
+
 
 export class PlatformEdgeStack extends cdk.Stack {
   public readonly distributionDomainName: string;
@@ -80,8 +75,6 @@ export class PlatformEdgeStack extends cdk.Stack {
     this.distributionDomainName = distribution.distributionDomainName;
 
     // ---- CRITICAL: explicit bucket policy for OAC ----
-    // Because the bucket is imported by name, CDK can't auto-attach the bucket policy.
-    // This policy allows only this CloudFront distribution to read objects.
     new s3.CfnBucketPolicy(this, "PlatformBucketPolicyForOAC", {
       bucket: props.platformFrontendBucketName,
       policyDocument: {
@@ -102,6 +95,7 @@ export class PlatformEdgeStack extends cdk.Stack {
         ],
       },
     });
+
 
     // Optional DNS wiring (only if you own/manage the domain)
     if (props.platformHostedZone && props.domainNames?.length) {

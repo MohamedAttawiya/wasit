@@ -70,7 +70,7 @@
 ---
 
 ## 15.4 AuthStack (`lib/auth/AuthStack.ts`)
-https://wasit-dev-auth.auth.eu-central-1.amazoncognito.com/login?client_id=33d9qiegt94mk61s20qutn6vua&response_type=token&scope=openid+email+profile&redirect_uri=https://d3g6c5f817lxm9.cloudfront.net/index.html
+
 
 aws cloudfront create-invalidation \
   --distribution-id E2N2B59MWGRBEA \

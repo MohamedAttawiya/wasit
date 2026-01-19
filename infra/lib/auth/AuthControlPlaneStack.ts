@@ -14,6 +14,8 @@ import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 
 export interface AuthControlPlaneStackProps extends cdk.StackProps {
   prefix: string;
+  // ✅ NEW: dynamic CORS allowOrigins (e.g. ["https://<cloudfront-domain>"])
+  corsAllowOrigins?: string[];
 
   // Creates this secret if missing (placeholder values REPLACE_ME).
   googleSecretName: string;
@@ -217,13 +219,14 @@ export class AuthControlPlaneStack extends cdk.Stack {
     // ----------------------------
     // DynamoDB: users_state
     // ----------------------------
-    this.usersStateTable = new ddb.Table(this, "UsersStateTable", {
-      tableName: props.usersStateTableName ?? "users_state",
-      partitionKey: { name: "userId", type: ddb.AttributeType.STRING }, // Cognito sub
-      billingMode: ddb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
+   this.usersStateTable = new ddb.Table(this, "UsersStateTable", {
+  tableName: props.usersStateTableName ?? "users_state",
+  partitionKey: { name: "pk", type: ddb.AttributeType.STRING }, // USER#<email>
+  billingMode: ddb.BillingMode.PAY_PER_REQUEST,
+  pointInTimeRecovery: true,
+  removalPolicy: cdk.RemovalPolicy.RETAIN,
+});
+
 
     // ----------------------------
     // DynamoDB: authz_grants
@@ -277,6 +280,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: [
           "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminDeleteUser",
           "cognito-idp:AdminAddUserToGroup",
           "cognito-idp:AdminRemoveUserFromGroup",
           "cognito-idp:AdminUpdateUserAttributes",
@@ -294,27 +298,31 @@ export class AuthControlPlaneStack extends cdk.Stack {
     // ----------------------------
     // HTTP API Gateway (JWT-protected)
     // ----------------------------
-    this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
-      apiName: `${prefix}-auth-control-plane`,
-      corsPreflight: {
-        allowHeaders: ["authorization", "content-type", "x-correlation-id"],
-        allowMethods: [
-          apigwv2.CorsHttpMethod.GET,
-          apigwv2.CorsHttpMethod.POST,
-          apigwv2.CorsHttpMethod.PATCH,
-          apigwv2.CorsHttpMethod.DELETE,
-          apigwv2.CorsHttpMethod.OPTIONS,
-        ],
-        allowOrigins: [
-          "http://localhost:3000",
-          "http://localhost:5173",
-          // Your platform CloudFront domain
-          "https://d3g6c5f817lxm9.cloudfront.net",
-        ],
-        allowCredentials: false,
-        maxAge: cdk.Duration.hours(1),
-      },
-    });
+const allowOrigins =
+  props.corsAllowOrigins && props.corsAllowOrigins.length > 0
+    ? props.corsAllowOrigins
+    : [
+        "http://localhost:3000",
+        "http://localhost:5173",
+      ];
+
+this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
+  apiName: `${prefix}-auth-control-plane`,
+  corsPreflight: {
+    allowHeaders: ["authorization", "content-type", "x-correlation-id"],
+    allowMethods: [
+      apigwv2.CorsHttpMethod.GET,
+      apigwv2.CorsHttpMethod.POST,
+      apigwv2.CorsHttpMethod.PATCH,
+      apigwv2.CorsHttpMethod.DELETE,
+      apigwv2.CorsHttpMethod.OPTIONS,
+    ],
+    allowOrigins,
+    allowCredentials: false,
+    maxAge: cdk.Duration.hours(1),
+  },
+});
+
 
     const integration = new apigwv2Integrations.HttpLambdaIntegration(
       "ControlPlaneIntegration",
@@ -339,23 +347,20 @@ export class AuthControlPlaneStack extends cdk.Stack {
     // ----------------------------
     // Routes (deduped, authoritative)
     // ----------------------------
-
-    // Users
-    add("/admin/users", apigwv2.HttpMethod.POST); // create user (by email)
-    add("/admin/users", apigwv2.HttpMethod.GET); // list users
-    add("/admin/users/{userId}", apigwv2.HttpMethod.GET); // get user by sub (future-safe)
-    add("/admin/users/{userId}/state", apigwv2.HttpMethod.PATCH); // update UsersState (future)
-
-    // Roles / access (admin-only, enforced in Lambda)
-    add("/admin/users/role", apigwv2.HttpMethod.PATCH); // set role by email
-
-    // Grants
-    add("/admin/grants", apigwv2.HttpMethod.POST);
-    add("/admin/grants", apigwv2.HttpMethod.GET);
-    add("/admin/grants", apigwv2.HttpMethod.DELETE);
-
     // Debug
-    add("/admin/_debug", apigwv2.HttpMethod.GET);
+add("/admin/_debug", apigwv2.HttpMethod.GET);
+
+// Users (list, create, delete-by-email-in-body)
+add("/admin/users", apigwv2.HttpMethod.GET);
+add("/admin/users", apigwv2.HttpMethod.POST);
+add("/admin/users", apigwv2.HttpMethod.DELETE);
+
+// Multi-group membership (set/add/remove)
+add("/admin/users/groups", apigwv2.HttpMethod.PATCH);
+
+// users_state (state transitions by email)
+add("/admin/users/state", apigwv2.HttpMethod.PATCH);
+
 
     // ----------------------------
     // Outputs

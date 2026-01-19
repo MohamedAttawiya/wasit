@@ -9,6 +9,8 @@ import { AuthControlPlaneStack } from "../lib/auth/AuthControlPlaneStack";
 import { PlatformDomainsStack } from "../lib/domains/PlatformDomainsStack";
 import { PlatformEdgeStack } from "../lib/domains/PlatformEdgeStack";
 import { AuthzSmokeStack } from "../lib/auth/AuthzSmokeStack";
+import { PlatformConfigStack } from "../lib/domains/PlatformConfigStack";
+
 
 const app = new cdk.App();
 
@@ -67,21 +69,6 @@ new StorefrontEdgeStack(app, `${PREFIX}-storefront-edge`, {
   domainRecordName: "*",
 });
 
-new AuthControlPlaneStack(app, `${PREFIX}-auth-controlplane`, {
-  env: envEU,
-  prefix: PREFIX,
-
-  googleSecretName: `${PREFIX}/google-oauth`,
-  createGoogleSecretIfMissing: false,
-
-  // ✅ Turn off Google until native flow works
-  enableGoogleIdp: false,
-
-  // ✅ Redirect back to your CloudFront-hosted tester UI
-  callbackUrls: ["https://d3g6c5f817lxm9.cloudfront.net/index.html"],
-  logoutUrls: ["https://d3g6c5f817lxm9.cloudfront.net/index.html"],
-});
-
 if (STAGE === "dev") {
   new AuthzSmokeStack(app, `${PREFIX}-authz-smoke`, {
     env: envEU,
@@ -89,26 +76,82 @@ if (STAGE === "dev") {
   });
 }
 
-// Platform domains (OFF for now)
-// Creates platform frontend bucket only (no hosted zone, no cert, no DNS wiring).
-const platformDomains = new PlatformDomainsStack(app, `${PREFIX}-platform-domains`, {
-  env: envEU,
-  stage: STAGE, // lifecycle only
-  platformDomain: PLATFORM_DOMAIN,
-  platformSubdomains: PLATFORM_SUBDOMAINS,
-  enablePlatformCustomDomain: false, // <-- switch OFF
-});
+// ------------------------------
+// Platform: bucket + (optional) zone/cert
+// ------------------------------
+const platformDomains = new PlatformDomainsStack(
+  app,
+  `${PREFIX}-platform-domains`,
+  {
+    env: envEU,
+    stage: STAGE,
+    platformDomain: PLATFORM_DOMAIN,
+    platformSubdomains: PLATFORM_SUBDOMAINS,
+    enablePlatformCustomDomain: false,
+    // NOTE: Do NOT pass authConfig here anymore if you want auth callback to come from Edge.
+    // We'll wire authConfig after auth exists (requires a small split stack), or you keep it fixed.
+  }
+);
 
-// Platform edge (ALWAYS ON): creates CloudFront distro in front of platform bucket.
-// When enablePlatformCustomDomain=false, this becomes an orphan cloudfront.net distro.
-// When you later flip the switch ON, it will auto wire domainNames + cert + Route53.
-new PlatformEdgeStack(app, `${PREFIX}-platform-edge`, {
+// ------------------------------
+// Platform Edge: CloudFront in front of platform bucket
+// ------------------------------
+const platformEdge = new PlatformEdgeStack(app, `${PREFIX}-platform-edge`, {
   env: envEU,
   stage: STAGE,
   platformFrontendBucketName: platformDomains.platformFrontendBucket.bucketName,
   domainNames: platformDomains.platformCertArn
-    ? [PLATFORM_DOMAIN, ...PLATFORM_SUBDOMAINS.map((s) => `${s}.${PLATFORM_DOMAIN}`)]
+    ? [
+        PLATFORM_DOMAIN,
+        ...PLATFORM_SUBDOMAINS.map((s) => `${s}.${PLATFORM_DOMAIN}`),
+      ]
     : undefined,
   certificateArn: platformDomains.platformCertArn,
   platformHostedZone: platformDomains.platformZone,
 });
+
+// ------------------------------
+// Auth: callback/logout URLs derived from the PlatformEdge distribution domain
+// ------------------------------
+const platformCallbackUrl = `https://${platformEdge.distributionDomainName}/index.html`;
+const platformOrigin = `https://${platformEdge.distributionDomainName}`;
+const auth = new AuthControlPlaneStack(app, `${PREFIX}-auth-controlplane`, {
+  env: envEU,
+  prefix: PREFIX,
+
+  googleSecretName: `${PREFIX}/google-oauth`,
+  createGoogleSecretIfMissing: false,
+
+  enableGoogleIdp: false,
+
+  // ✅ derived from creator (PlatformEdgeStack)
+  callbackUrls: [platformCallbackUrl],
+  logoutUrls: [platformCallbackUrl],
+
+  // ✅ NEW: dynamic CORS (plus local dev)
+  corsAllowOrigins: [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    platformOrigin,
+  ],
+});
+
+// Ensure the CloudFront domain is available for the callback URL token
+auth.addDependency(platformEdge);
+
+
+const platformConfig = new PlatformConfigStack(app, `${PREFIX}-platform-config`, {
+  env: envEU,
+  stage: STAGE,
+  platformFrontendBucketName: platformDomains.platformFrontendBucket.bucketName,
+  authConfig: {
+    clientId: auth.webClient.userPoolClientId,
+    apiBaseUrl: auth.httpApi.apiEndpoint,
+    userPoolId: auth.userPool.userPoolId,
+    issuer: auth.issuer,
+    cognitoDomain: auth.cognitoHostedDomain,
+  },
+});
+
+platformConfig.addDependency(platformDomains);
+platformConfig.addDependency(auth);

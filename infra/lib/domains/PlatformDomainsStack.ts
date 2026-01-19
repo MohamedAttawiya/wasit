@@ -10,10 +10,19 @@ import * as path from "path";
 export interface PlatformDomainsStackProps extends cdk.StackProps {
   stage: string;
 
-  platformDomain: string; // e.g. "wasit.eg"
-  platformSubdomains?: string[]; // e.g. ["api","admin","god"]
+  platformDomain: string;
+  platformSubdomains?: string[];
 
   enablePlatformCustomDomain?: boolean;
+
+  // ✅ NEW: publish auth.json alongside the frontend
+  authConfig?: {
+    clientId: string;
+    apiBaseUrl: string;
+    userPoolId: string;
+    issuer?: string;
+    cognitoDomain?: string;
+  };
 }
 
 export class PlatformDomainsStack extends cdk.Stack {
@@ -42,10 +51,34 @@ export class PlatformDomainsStack extends cdk.Stack {
     });
 
     // Auto-upload local platform-frontend -> S3 on deploy
+    const authJson =
+      props.authConfig
+        ? JSON.stringify(
+            {
+              clientID: props.authConfig.clientId,
+              apiBaseUrl: props.authConfig.apiBaseUrl,
+              userPoolId: props.authConfig.userPoolId,
+              issuer: props.authConfig.issuer,
+              cognitoDomain: props.authConfig.cognitoDomain,
+            },
+            null,
+            2
+          )
+        : undefined;
+
     new s3deploy.BucketDeployment(this, "DeployPlatformFrontend", {
       destinationBucket: this.platformFrontendBucket,
-      sources: [s3deploy.Source.asset(path.join(__dirname, "../../../platform-frontend"))],
+      sources: [
+        s3deploy.Source.asset(path.join(__dirname, "../../../platform-frontend"), {
+          exclude: ["auth.json"],
+        }),
+      ],
+
+      // ✅ IMPORTANT: do NOT delete files created by other deployments (auth.json)
+      prune: false,
     });
+
+
 
     new cdk.CfnOutput(this, "PlatformFrontendBucketName", {
       value: this.platformFrontendBucket.bucketName,

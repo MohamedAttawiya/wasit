@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Internal Ops</title>
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+
+  <body>
+    <div id="app"></div>
+
+    <script type="module">
+      import {
+        readTokensFromHashAndPersist,
+        renderShell,
+        requireGroup,
+      } from "./js/auth.js";
+
+      readTokensFromHashAndPersist();
+      const gate = requireGroup("InternalOps");
+      if (!gate.allowed) {
+        if (gate.redirected) { /* noop */ }
+      } else {
+        const session = gate.session;
+        const { main } = renderShell({
+          session,
+          heading: "Internal Ops",
+          subheading: "Restricted to InternalOps role.",
+        });
+
+        const card = document.createElement("div");
+        card.className = "card";
+
+        const h2 = document.createElement("h2");
+        h2.textContent = "You are authorized";
+        card.appendChild(h2);
+
+        const line = document.createElement("p");
+        line.textContent = `You are authorized as ${session.email || "Unknown"} (InternalOps).`;
+        card.appendChild(line);
+
+        const back = document.createElement("a");
+        back.href = "index.html";
+        back.className = "btn";
+        back.textContent = "Back Home";
+        card.appendChild(back);
+
+        main.appendChild(card);
+      }
+    </script>
+  </body>
+</html>
