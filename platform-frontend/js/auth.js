@@ -77,6 +77,14 @@ function buildHostedUiUrl({ cognitoDomain, clientID, redirectUri, kind }) {
     return url.toString();
   }
 
+    if (kind === "signup") {
+    const url = new URL("/signup", base);
+    url.searchParams.set("client_id", clientID);
+    url.searchParams.set("response_type", "token");
+    url.searchParams.set("scope", "openid email profile");
+    url.searchParams.set("redirect_uri", redirectUri);
+    return url.toString();
+  }
   if (kind === "logout") {
     const url = new URL("/logout", base);
     url.searchParams.set("client_id", clientID);
@@ -243,6 +251,18 @@ export async function loginUrl() {
     kind: "login",
   });
 }
+
+export async function signupUrl() {
+  const cfg = await loadAuthConfig();
+  const redirectUri = currentRedirectUri();
+  return buildHostedUiUrl({
+    cognitoDomain: cfg.cognitoDomain,
+    clientID: cfg.clientID,
+    redirectUri,
+    kind: "signup",
+  });
+}
+
 
 export async function logoutUrl() {
   const cfg = await loadAuthConfig();

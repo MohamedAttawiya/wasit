@@ -14,6 +14,7 @@
       import {
         getSession,
         loginUrl,
+        signupUrl,
         logout,
         readTokensFromHashAndPersist,
         renderShell,
@@ -70,6 +71,26 @@ loginUrl()
       loginBtn.textContent = "Login";
       loginBtn.rel = "noreferrer";
       ctaRow.appendChild(loginBtn);
+
+      const signupBtn = document.createElement("a");
+signupBtn.href = "#";
+
+signupUrl()
+  .then((u) => {
+    signupBtn.href = u;
+  })
+  .catch((e) => {
+    console.error("Failed to build signup URL (auth.json fetch/build likely failed):", e);
+    signupBtn.href = "/index.html";
+    signupBtn.title = `Signup URL build failed: ${String(e?.message || e)}`;
+    signupBtn.textContent = "Sign up (config error)";
+  });
+
+signupBtn.className = "btn";
+signupBtn.textContent = "Sign up";
+signupBtn.rel = "noreferrer";
+
+ctaRow.appendChild(signupBtn);
 
       if (session.loggedIn) {
         const logoutBtn = document.createElement("button");

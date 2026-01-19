@@ -14,14 +14,13 @@ import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 
 export interface AuthControlPlaneStackProps extends cdk.StackProps {
   prefix: string;
-  // ✅ NEW: dynamic CORS allowOrigins (e.g. ["https://<cloudfront-domain>"])
+
+  // dynamic CORS allowOrigins (e.g. ["https://<cloudfront-domain>"])
   corsAllowOrigins?: string[];
 
-  // Creates this secret if missing (placeholder values REPLACE_ME).
   googleSecretName: string;
   createGoogleSecretIfMissing: boolean;
 
-  // IMPORTANT: keep false until you actually have real Google creds.
   enableGoogleIdp?: boolean;
 
   callbackUrls: string[];
@@ -30,7 +29,6 @@ export interface AuthControlPlaneStackProps extends cdk.StackProps {
   usersStateTableName?: string; // default "users_state"
   authzGrantsTableName?: string; // default "authz_grants"
 
-  // Optional: override Cognito domain prefix (must be globally unique)
   cognitoDomainPrefix?: string;
 }
 
@@ -40,9 +38,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
   public readonly usersStateTable: ddb.Table;
   public readonly authzGrantsTable: ddb.Table;
 
-  // NOTE: keep type as lambda.IFunction so NodejsFunction is acceptable
   public readonly controlPlaneFn: lambda.IFunction;
-
   public readonly httpApi: apigwv2.HttpApi;
 
   public readonly issuer: string;
@@ -85,9 +81,12 @@ export class AuthControlPlaneStack extends cdk.Stack {
     this.userPool = new cognito.UserPool(this, "UserPool", {
       userPoolName: `${prefix}-users`,
       signInAliases: { email: true },
-      selfSignUpEnabled: false,
+
+      // ✅ Enable self-signup (Hosted UI signup)
+      selfSignUpEnabled: true,
+
       standardAttributes: {
-        email: { required: true, mutable: true }, // admin-facing ID; keep mutable=true for now
+        email: { required: true, mutable: true },
         fullname: { required: false, mutable: true },
       },
       passwordPolicy: {
@@ -102,9 +101,8 @@ export class AuthControlPlaneStack extends cdk.Stack {
     });
 
     // ----------------------------
-    // Groups (rename away from "GodAdmin")
+    // Groups
     // ----------------------------
-    // Top group: "PlatformAdmin" (powerful, non-sacrilegious)
     new cognito.CfnUserPoolGroup(this, "PlatformAdminGroup", {
       userPoolId: this.userPool.userPoolId,
       groupName: "PlatformAdmin",
@@ -127,9 +125,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
     // AWS-provided Cognito domain (Hosted UI)
     // ----------------------------
     const domainPrefix =
-      props.cognitoDomainPrefix ??
-      // must be globally unique; adjust if collision happens
-      `${prefix}-auth`;
+      props.cognitoDomainPrefix ?? `${prefix}-auth`;
 
     const domain = this.userPool.addDomain("HostedDomain", {
       cognitoDomain: { domainPrefix },
@@ -149,7 +145,6 @@ export class AuthControlPlaneStack extends cdk.Stack {
     let googleProvider: cognito.CfnUserPoolIdentityProvider | undefined;
 
     if (enableGoogleIdp) {
-      // NOTE: Do NOT read secret values unless enableGoogleIdp=true.
       const googleClientId = googleSecret
         .secretValueFromJson("clientId")
         .unsafeUnwrap();
@@ -196,7 +191,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
       oAuth: {
         flows: {
           authorizationCodeGrant: true,
-          implicitCodeGrant: true, // fine for testing; remove later if you want
+          implicitCodeGrant: true,
         },
         scopes: [
           cognito.OAuthScope.OPENID,
@@ -209,24 +204,22 @@ export class AuthControlPlaneStack extends cdk.Stack {
       supportedIdentityProviders: supportedProviders,
     });
 
-    // Ensure client waits for IdP when enabled
     if (googleProvider) {
-      (
-        this.webClient.node.defaultChild as cognito.CfnUserPoolClient
-      ).addDependency(googleProvider);
+      (this.webClient.node.defaultChild as cognito.CfnUserPoolClient).addDependency(
+        googleProvider
+      );
     }
 
     // ----------------------------
     // DynamoDB: users_state
     // ----------------------------
-   this.usersStateTable = new ddb.Table(this, "UsersStateTable", {
-  tableName: props.usersStateTableName ?? "users_state",
-  partitionKey: { name: "pk", type: ddb.AttributeType.STRING }, // USER#<email>
-  billingMode: ddb.BillingMode.PAY_PER_REQUEST,
-  pointInTimeRecovery: true,
-  removalPolicy: cdk.RemovalPolicy.RETAIN,
-});
-
+    this.usersStateTable = new ddb.Table(this, "UsersStateTable", {
+      tableName: props.usersStateTableName ?? "users_state",
+      partitionKey: { name: "pk", type: ddb.AttributeType.STRING }, // USER#<email>
+      billingMode: ddb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
 
     // ----------------------------
     // DynamoDB: authz_grants
@@ -260,8 +253,6 @@ export class AuthControlPlaneStack extends cdk.Stack {
         USER_POOL_ID: this.userPool.userPoolId,
         USERS_STATE_TABLE: this.usersStateTable.tableName,
         AUTHZ_GRANTS_TABLE: this.authzGrantsTable.tableName,
-        // IMPORTANT: align with your Lambda enforcement
-        // (i.e., requireGroup(principal, "PlatformAdmin"))
         PLATFORM_ADMIN_GROUP: "PlatformAdmin",
       },
       bundling: {
@@ -296,33 +287,59 @@ export class AuthControlPlaneStack extends cdk.Stack {
     );
 
     // ----------------------------
+    // ✅ Cognito PostConfirmation trigger: ensure users_state for self-signup
+    // ----------------------------
+    const postConfirmationFn = new NodejsFunction(this, "PostConfirmationFn", {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: path.join(__dirname, "../../lambda/auth/postConfirmation.ts"),
+      handler: "handler",
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 128,
+      environment: {
+        USERS_STATE_TABLE: this.usersStateTable.tableName,
+      },
+      bundling: {
+        externalModules: [],
+        format: OutputFormat.ESM,
+        target: "node20",
+        sourceMap: true,
+        minify: false,
+      },
+    });
+
+    // permissions to write users_state
+    this.usersStateTable.grantReadWriteData(postConfirmationFn);
+
+    // attach trigger
+    this.userPool.addTrigger(
+      cognito.UserPoolOperation.POST_CONFIRMATION,
+      postConfirmationFn
+    );
+
+    // ----------------------------
     // HTTP API Gateway (JWT-protected)
     // ----------------------------
-const allowOrigins =
-  props.corsAllowOrigins && props.corsAllowOrigins.length > 0
-    ? props.corsAllowOrigins
-    : [
-        "http://localhost:3000",
-        "http://localhost:5173",
-      ];
+    const allowOrigins =
+      props.corsAllowOrigins && props.corsAllowOrigins.length > 0
+        ? props.corsAllowOrigins
+        : ["http://localhost:3000", "http://localhost:5173"];
 
-this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
-  apiName: `${prefix}-auth-control-plane`,
-  corsPreflight: {
-    allowHeaders: ["authorization", "content-type", "x-correlation-id"],
-    allowMethods: [
-      apigwv2.CorsHttpMethod.GET,
-      apigwv2.CorsHttpMethod.POST,
-      apigwv2.CorsHttpMethod.PATCH,
-      apigwv2.CorsHttpMethod.DELETE,
-      apigwv2.CorsHttpMethod.OPTIONS,
-    ],
-    allowOrigins,
-    allowCredentials: false,
-    maxAge: cdk.Duration.hours(1),
-  },
-});
-
+    this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
+      apiName: `${prefix}-auth-control-plane`,
+      corsPreflight: {
+        allowHeaders: ["authorization", "content-type", "x-correlation-id"],
+        allowMethods: [
+          apigwv2.CorsHttpMethod.GET,
+          apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PATCH,
+          apigwv2.CorsHttpMethod.DELETE,
+          apigwv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowOrigins,
+        allowCredentials: false,
+        maxAge: cdk.Duration.hours(1),
+      },
+    });
 
     const integration = new apigwv2Integrations.HttpLambdaIntegration(
       "ControlPlaneIntegration",
@@ -345,22 +362,16 @@ this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
     };
 
     // ----------------------------
-    // Routes (deduped, authoritative)
+    // Routes
     // ----------------------------
-    // Debug
-add("/admin/_debug", apigwv2.HttpMethod.GET);
+    add("/admin/_debug", apigwv2.HttpMethod.GET);
 
-// Users (list, create, delete-by-email-in-body)
-add("/admin/users", apigwv2.HttpMethod.GET);
-add("/admin/users", apigwv2.HttpMethod.POST);
-add("/admin/users", apigwv2.HttpMethod.DELETE);
+    add("/admin/users", apigwv2.HttpMethod.GET);
+    add("/admin/users", apigwv2.HttpMethod.POST);
+    add("/admin/users", apigwv2.HttpMethod.DELETE);
 
-// Multi-group membership (set/add/remove)
-add("/admin/users/groups", apigwv2.HttpMethod.PATCH);
-
-// users_state (state transitions by email)
-add("/admin/users/state", apigwv2.HttpMethod.PATCH);
-
+    add("/admin/users/groups", apigwv2.HttpMethod.PATCH);
+    add("/admin/users/state", apigwv2.HttpMethod.PATCH);
 
     // ----------------------------
     // Outputs
@@ -405,7 +416,6 @@ add("/admin/users/state", apigwv2.HttpMethod.PATCH);
       exportName: `${prefix}-control-plane-api-url`,
     });
 
-    // IMPORTANT: Fix the unterminated string bug you hit earlier
     new cdk.CfnOutput(this, "Auth_GoogleIdpEnabled", {
       value: enableGoogleIdp ? "true" : "false",
       exportName: `${prefix}-auth-google-enabled`,

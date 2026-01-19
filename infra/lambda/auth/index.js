@@ -148,7 +148,6 @@ export async function handler(event) {
           { Name: "email_verified", Value: "true" },
           ...(name ? [{ Name: "name", Value: name }] : []),
         ],
-        MessageAction: "SUPPRESS",
       });
 
       // Apply groups (multi-group) if provided
