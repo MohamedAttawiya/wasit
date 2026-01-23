@@ -1,4 +1,5 @@
 // infra/lib/auth/AuthControlPlaneStack.ts
+
 import * as path from "path";
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
@@ -14,20 +15,18 @@ import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 
 export interface AuthControlPlaneStackProps extends cdk.StackProps {
   prefix: string;
-
-  // dynamic CORS allowOrigins (e.g. ["https://<cloudfront-domain>"])
   corsAllowOrigins?: string[];
 
   googleSecretName: string;
   createGoogleSecretIfMissing: boolean;
-
   enableGoogleIdp?: boolean;
 
   callbackUrls: string[];
   logoutUrls: string[];
 
-  usersStateTableName?: string; // default "users_state"
-  authzGrantsTableName?: string; // default "authz_grants"
+  usersStateTableName?: string;        // default users_state
+  authzGrantsTableName?: string;       // default authz_grants
+  authzCapabilitiesTableName?: string; // default authz_capabilities
 
   cognitoDomainPrefix?: string;
 }
@@ -35,8 +34,10 @@ export interface AuthControlPlaneStackProps extends cdk.StackProps {
 export class AuthControlPlaneStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool;
   public readonly webClient: cognito.UserPoolClient;
+
   public readonly usersStateTable: ddb.Table;
   public readonly authzGrantsTable: ddb.Table;
+  public readonly authzCapabilitiesTable: ddb.Table;
 
   public readonly controlPlaneFn: lambda.IFunction;
   public readonly httpApi: apigwv2.HttpApi;
@@ -52,28 +53,22 @@ export class AuthControlPlaneStack extends cdk.Stack {
     const enableGoogleIdp = props.enableGoogleIdp ?? false;
 
     // ----------------------------
-    // Secrets Manager: Google OAuth creds (placeholder)
+    // Google OAuth Secret
     // ----------------------------
-    let googleSecret: secretsmanager.ISecret;
-
-    if (props.createGoogleSecretIfMissing) {
-      googleSecret = new secretsmanager.Secret(this, "GoogleOAuthSecret", {
-        secretName: props.googleSecretName,
-        description:
-          'Google OAuth credentials JSON: {"clientId":"...","clientSecret":"..."}',
-        secretObjectValue: {
-          clientId: cdk.SecretValue.unsafePlainText("REPLACE_ME"),
-          clientSecret: cdk.SecretValue.unsafePlainText("REPLACE_ME"),
-        },
-        removalPolicy: cdk.RemovalPolicy.RETAIN,
-      });
-    } else {
-      googleSecret = secretsmanager.Secret.fromSecretNameV2(
-        this,
-        "GoogleOAuthSecretImported",
-        props.googleSecretName
-      );
-    }
+    const googleSecret = props.createGoogleSecretIfMissing
+      ? new secretsmanager.Secret(this, "GoogleOAuthSecret", {
+          secretName: props.googleSecretName,
+          secretObjectValue: {
+            clientId: cdk.SecretValue.unsafePlainText("REPLACE_ME"),
+            clientSecret: cdk.SecretValue.unsafePlainText("REPLACE_ME"),
+          },
+          removalPolicy: cdk.RemovalPolicy.RETAIN,
+        })
+      : secretsmanager.Secret.fromSecretNameV2(
+          this,
+          "GoogleOAuthSecretImported",
+          props.googleSecretName
+        );
 
     // ----------------------------
     // Cognito User Pool
@@ -81,10 +76,7 @@ export class AuthControlPlaneStack extends cdk.Stack {
     this.userPool = new cognito.UserPool(this, "UserPool", {
       userPoolName: `${prefix}-users`,
       signInAliases: { email: true },
-
-      // ✅ Enable self-signup (Hosted UI signup)
       selfSignUpEnabled: true,
-
       standardAttributes: {
         email: { required: true, mutable: true },
         fullname: { required: false, mutable: true },
@@ -101,92 +93,45 @@ export class AuthControlPlaneStack extends cdk.Stack {
     });
 
     // ----------------------------
-    // Groups
+    // Hosted UI Domain
     // ----------------------------
-    new cognito.CfnUserPoolGroup(this, "PlatformAdminGroup", {
-      userPoolId: this.userPool.userPoolId,
-      groupName: "PlatformAdmin",
-      description: "Full platform control (root)",
-    });
-
-    new cognito.CfnUserPoolGroup(this, "InternalOpsGroup", {
-      userPoolId: this.userPool.userPoolId,
-      groupName: "InternalOps",
-      description: "Operational users",
-    });
-
-    new cognito.CfnUserPoolGroup(this, "SellerGroup", {
-      userPoolId: this.userPool.userPoolId,
-      groupName: "Seller",
-      description: "Sellers / merchants",
-    });
-
-    // ----------------------------
-    // AWS-provided Cognito domain (Hosted UI)
-    // ----------------------------
-    const domainPrefix =
-      props.cognitoDomainPrefix ?? `${prefix}-auth`;
+    const domainPrefix = props.cognitoDomainPrefix ?? `${prefix}-auth`;
 
     const domain = this.userPool.addDomain("HostedDomain", {
       cognitoDomain: { domainPrefix },
     });
 
-    const hostedDomainHost = `${domainPrefix}.auth.${this.region}.amazoncognito.com`;
+    this.cognitoHostedDomain = `${domainPrefix}.auth.${this.region}.amazoncognito.com`;
+    this.googleRedirectUri = `https://${this.cognitoHostedDomain}/oauth2/idpresponse`;
 
-    this.cognitoHostedDomain = hostedDomainHost;
-    this.googleRedirectUri = `https://${hostedDomainHost}/oauth2/idpresponse`;
-
-    // Issuer used by API Gateway JWT authorizer
     this.issuer = `https://cognito-idp.${this.region}.amazonaws.com/${this.userPool.userPoolId}`;
 
     // ----------------------------
-    // Optional: Google Identity Provider
+    // Optional Google IdP
     // ----------------------------
-    let googleProvider: cognito.CfnUserPoolIdentityProvider | undefined;
-
     if (enableGoogleIdp) {
-      const googleClientId = googleSecret
-        .secretValueFromJson("clientId")
-        .unsafeUnwrap();
-
-      const googleClientSecret = googleSecret
-        .secretValueFromJson("clientSecret")
-        .unsafeUnwrap();
-
-      googleProvider = new cognito.CfnUserPoolIdentityProvider(
-        this,
-        "GoogleProvider",
-        {
-          providerName: "Google",
-          providerType: "Google",
-          userPoolId: this.userPool.userPoolId,
-          providerDetails: {
-            client_id: googleClientId,
-            client_secret: googleClientSecret,
-            authorize_scopes: "profile email",
-          },
-          attributeMapping: {
-            email: "email",
-            name: "name",
-            email_verified: "email_verified",
-          },
-        }
-      );
+      new cognito.CfnUserPoolIdentityProvider(this, "GoogleProvider", {
+        providerName: "Google",
+        providerType: "Google",
+        userPoolId: this.userPool.userPoolId,
+        providerDetails: {
+          client_id: googleSecret.secretValueFromJson("clientId").unsafeUnwrap(),
+          client_secret: googleSecret.secretValueFromJson("clientSecret").unsafeUnwrap(),
+          authorize_scopes: "profile email",
+        },
+        attributeMapping: {
+          email: "email",
+          name: "name",
+          email_verified: "email_verified",
+        },
+      });
     }
 
     // ----------------------------
-    // User Pool Client (OAuth)
+    // OAuth Client
     // ----------------------------
-    const supportedProviders: cognito.UserPoolClientIdentityProvider[] = [
-      cognito.UserPoolClientIdentityProvider.COGNITO,
-    ];
-    if (enableGoogleIdp) {
-      supportedProviders.push(cognito.UserPoolClientIdentityProvider.GOOGLE);
-    }
-
     this.webClient = new cognito.UserPoolClient(this, "WebClient", {
       userPool: this.userPool,
-      userPoolClientName: `${prefix}-web`,
       generateSecret: false,
       oAuth: {
         flows: {
@@ -201,29 +146,25 @@ export class AuthControlPlaneStack extends cdk.Stack {
         callbackUrls: props.callbackUrls,
         logoutUrls: props.logoutUrls,
       },
-      supportedIdentityProviders: supportedProviders,
+      supportedIdentityProviders: enableGoogleIdp
+        ? [
+            cognito.UserPoolClientIdentityProvider.COGNITO,
+            cognito.UserPoolClientIdentityProvider.GOOGLE,
+          ]
+        : [cognito.UserPoolClientIdentityProvider.COGNITO],
     });
 
-    if (googleProvider) {
-      (this.webClient.node.defaultChild as cognito.CfnUserPoolClient).addDependency(
-        googleProvider
-      );
-    }
-
     // ----------------------------
-    // DynamoDB: users_state
+    // DynamoDB Tables
     // ----------------------------
     this.usersStateTable = new ddb.Table(this, "UsersStateTable", {
       tableName: props.usersStateTableName ?? "users_state",
-      partitionKey: { name: "pk", type: ddb.AttributeType.STRING }, // USER#<email>
+      partitionKey: { name: "pk", type: ddb.AttributeType.STRING },
       billingMode: ddb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecovery: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // ----------------------------
-    // DynamoDB: authz_grants
-    // ----------------------------
     this.authzGrantsTable = new ddb.Table(this, "AuthzGrantsTable", {
       tableName: props.authzGrantsTableName ?? "authz_grants",
       partitionKey: { name: "pk", type: ddb.AttributeType.STRING },
@@ -233,15 +174,16 @@ export class AuthControlPlaneStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    this.authzGrantsTable.addGlobalSecondaryIndex({
-      indexName: "gsi1_resource",
-      partitionKey: { name: "gsi1pk", type: ddb.AttributeType.STRING },
-      sortKey: { name: "gsi1sk", type: ddb.AttributeType.STRING },
-      projectionType: ddb.ProjectionType.ALL,
+    this.authzCapabilitiesTable = new ddb.Table(this, "AuthzCapabilitiesTable", {
+      tableName: props.authzCapabilitiesTableName ?? "authz_capabilities",
+      partitionKey: { name: "pk", type: ddb.AttributeType.STRING }, // GROUP#<name>
+      billingMode: ddb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     // ----------------------------
-    // Control-plane Lambda (routes: /admin/*)
+    // Control Plane Lambda
     // ----------------------------
     this.controlPlaneFn = new NodejsFunction(this, "AuthControlPlaneFn", {
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -253,77 +195,29 @@ export class AuthControlPlaneStack extends cdk.Stack {
         USER_POOL_ID: this.userPool.userPoolId,
         USERS_STATE_TABLE: this.usersStateTable.tableName,
         AUTHZ_GRANTS_TABLE: this.authzGrantsTable.tableName,
-        PLATFORM_ADMIN_GROUP: "PlatformAdmin",
+        AUTHZ_CAPABILITIES_TABLE: this.authzCapabilitiesTable.tableName,
       },
       bundling: {
-        externalModules: [],
         format: OutputFormat.ESM,
         target: "node20",
         sourceMap: true,
-        minify: false,
       },
     });
 
     this.usersStateTable.grantReadWriteData(this.controlPlaneFn);
     this.authzGrantsTable.grantReadWriteData(this.controlPlaneFn);
+    this.authzCapabilitiesTable.grantReadWriteData(this.controlPlaneFn);
 
     this.controlPlaneFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: [
-          "cognito-idp:AdminCreateUser",
-          "cognito-idp:AdminDeleteUser",
-          "cognito-idp:AdminAddUserToGroup",
-          "cognito-idp:AdminRemoveUserFromGroup",
-          "cognito-idp:AdminUpdateUserAttributes",
-          "cognito-idp:AdminDisableUser",
-          "cognito-idp:AdminEnableUser",
-          "cognito-idp:AdminGetUser",
-          "cognito-idp:ListUsers",
-          "cognito-idp:ListGroups",
-          "cognito-idp:AdminListGroupsForUser",
-        ],
+        actions: ["cognito-idp:*"],
         resources: [this.userPool.userPoolArn],
       })
     );
 
     // ----------------------------
-    // ✅ Cognito PostConfirmation trigger: ensure users_state for self-signup
+    // HTTP API + JWT Authorizer
     // ----------------------------
-    const postConfirmationFn = new NodejsFunction(this, "PostConfirmationFn", {
-      runtime: lambda.Runtime.NODEJS_20_X,
-      entry: path.join(__dirname, "../../lambda/auth/postConfirmation.ts"),
-      handler: "handler",
-      timeout: cdk.Duration.seconds(10),
-      memorySize: 128,
-      environment: {
-        USERS_STATE_TABLE: this.usersStateTable.tableName,
-      },
-      bundling: {
-        externalModules: [],
-        format: OutputFormat.ESM,
-        target: "node20",
-        sourceMap: true,
-        minify: false,
-      },
-    });
-
-    // permissions to write users_state
-    this.usersStateTable.grantReadWriteData(postConfirmationFn);
-
-    // attach trigger
-    this.userPool.addTrigger(
-      cognito.UserPoolOperation.POST_CONFIRMATION,
-      postConfirmationFn
-    );
-
-    // ----------------------------
-    // HTTP API Gateway (JWT-protected)
-    // ----------------------------
-    const allowOrigins =
-      props.corsAllowOrigins && props.corsAllowOrigins.length > 0
-        ? props.corsAllowOrigins
-        : ["http://localhost:3000", "http://localhost:5173"];
-
     this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
       apiName: `${prefix}-auth-control-plane`,
       corsPreflight: {
@@ -333,11 +227,8 @@ export class AuthControlPlaneStack extends cdk.Stack {
           apigwv2.CorsHttpMethod.POST,
           apigwv2.CorsHttpMethod.PATCH,
           apigwv2.CorsHttpMethod.DELETE,
-          apigwv2.CorsHttpMethod.OPTIONS,
         ],
-        allowOrigins,
-        allowCredentials: false,
-        maxAge: cdk.Duration.hours(1),
+        allowOrigins: props.corsAllowOrigins ?? ["http://localhost:3000"],
       },
     });
 
@@ -347,78 +238,16 @@ export class AuthControlPlaneStack extends cdk.Stack {
     );
 
     const authorizer = new apigwv2Auth.HttpJwtAuthorizer(
-      "CognitoJwtAuthorizer",
+      "JwtAuthorizer",
       this.issuer,
       { jwtAudience: [this.webClient.userPoolClientId] }
     );
 
-    const add = (routePath: string, method: apigwv2.HttpMethod) => {
-      this.httpApi.addRoutes({
-        path: routePath,
-        methods: [method],
-        integration,
-        authorizer,
-      });
-    };
-
-    // ----------------------------
-    // Routes
-    // ----------------------------
-    add("/admin/_debug", apigwv2.HttpMethod.GET);
-
-    add("/admin/users", apigwv2.HttpMethod.GET);
-    add("/admin/users", apigwv2.HttpMethod.POST);
-    add("/admin/users", apigwv2.HttpMethod.DELETE);
-
-    add("/admin/users/groups", apigwv2.HttpMethod.PATCH);
-    add("/admin/users/state", apigwv2.HttpMethod.PATCH);
-
-    // ----------------------------
-    // Outputs
-    // ----------------------------
-    new cdk.CfnOutput(this, "Auth_Issuer", {
-      value: this.issuer,
-      exportName: `${prefix}-auth-issuer`,
-    });
-
-    new cdk.CfnOutput(this, "Auth_UserPoolId", {
-      value: this.userPool.userPoolId,
-      exportName: `${prefix}-auth-userpool-id`,
-    });
-
-    new cdk.CfnOutput(this, "Auth_WebClientId", {
-      value: this.webClient.userPoolClientId,
-      exportName: `${prefix}-auth-webclient-id`,
-    });
-
-    new cdk.CfnOutput(this, "Auth_CognitoDomain", {
-      value: this.cognitoHostedDomain,
-      exportName: `${prefix}-auth-cognito-domain`,
-    });
-
-    new cdk.CfnOutput(this, "Auth_GoogleRedirectUri", {
-      value: this.googleRedirectUri,
-      exportName: `${prefix}-auth-google-redirect-uri`,
-    });
-
-    new cdk.CfnOutput(this, "UsersStateTableName", {
-      value: this.usersStateTable.tableName,
-      exportName: `${prefix}-users-state-table`,
-    });
-
-    new cdk.CfnOutput(this, "AuthzGrantsTableName", {
-      value: this.authzGrantsTable.tableName,
-      exportName: `${prefix}-authz-grants-table`,
-    });
-
-    new cdk.CfnOutput(this, "ControlPlaneApiUrl", {
-      value: this.httpApi.apiEndpoint,
-      exportName: `${prefix}-control-plane-api-url`,
-    });
-
-    new cdk.CfnOutput(this, "Auth_GoogleIdpEnabled", {
-      value: enableGoogleIdp ? "true" : "false",
-      exportName: `${prefix}-auth-google-enabled`,
+    this.httpApi.addRoutes({
+      path: "/{proxy+}",
+      methods: [apigwv2.HttpMethod.ANY],
+      integration,
+      authorizer,
     });
   }
 }

@@ -1,0 +1,22 @@
+{
+  "principal": {
+    "userId": "b8f1c8c6-2c88-4b35-9e1a-0b8d2a9f6c1a",
+    "email": "user@example.com",
+    "groups": ["Seller"],
+    "claims": {
+      "sub": "b8f1c8c6-2c88-4b35-9e1a-0b8d2a9f6c1a",
+      "email": "user@example.com",
+      "cognito:groups": ["Seller"],
+      "token_use": "id"
+    }
+  },
+  "state": "ACTIVE",
+  "capabilities": [
+    "seller.portal",
+    "store.create",
+    "store.manage"
+  ],
+  "resources": {
+    "can": "function"
+  }
+}
