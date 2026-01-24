@@ -1,3 +1,4 @@
+// packages/authz/src/principal.ts
 import { verifyAccessToken } from "./verify.js";
 import { UnauthorizedError } from "./errors.js";
 
@@ -15,6 +16,19 @@ function extractBearer(event: any): string | null {
   return m?.[1] || null;
 }
 
+function pickClaims(claims: any) {
+  return {
+    sub: claims.sub,
+    email: claims.email,
+    "cognito:groups": claims["cognito:groups"] ?? [],
+    token_use: claims.token_use,
+    scope: claims.scope,
+    iss: claims.iss,
+    exp: claims.exp,
+    iat: claims.iat,
+  };
+}
+
 export async function resolvePrincipalOptional(event: any): Promise<Principal | null> {
   const token = extractBearer(event);
   if (!token) return null;
@@ -25,7 +39,7 @@ export async function resolvePrincipalOptional(event: any): Promise<Principal | 
     userId: claims.sub,
     email: claims.email?.toLowerCase(),
     groups: claims["cognito:groups"] || [],
-    claims,
+    claims: pickClaims(claims),
   };
 }
 

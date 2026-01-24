@@ -2,7 +2,7 @@ import {
   resolvePrincipalOptional,
   resolvePrincipalRequired,
 } from "./principal.js";
-import { resolveUserState } from "./state.js";
+import { resolveUserStateBySub } from "./state.js";
 import { resolveCapabilities } from "./capabilities.js";
 import { resolveGrants } from "./grants.js";
 import { ForbiddenError } from "./errors.js";
@@ -14,10 +14,10 @@ type Opts = {
 };
 
 async function resolve(principal: any, opts: Opts) {
-  const state =
-    principal?.email
-      ? await resolveUserState(principal.email, opts.usersStateTable)
-      : null;
+
+const state = principal
+  ? await resolveUserStateBySub(principal.userId, opts.usersStateTable)
+  : null;
 
   const capabilities = principal
     ? await resolveCapabilities(principal.groups, opts.authzCapabilitiesTable)
