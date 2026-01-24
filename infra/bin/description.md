@@ -1,253 +1,195 @@
-# 15. CDK Stack Breakdown
+# Wasit Infrastructure — Compressed Layering & Deployment Order
 
-## 15.1 Principles
-
-- **Domains are the only authorities.** Every business capability (orders, pricing, inventory, financials, etc.) is owned and enforced by a single domain stack. Domains own their data, APIs, invariants, and workflows. Nothing else is allowed to mutate domain state.
-- **UI stacks are clients, not systems.** GodStack, SellerAdminStack, InternalOpsStack, StorefrontStack, and WasitMainStack are delivery planes only (UI + edge + routing). They call domain APIs; they do not own domain logic, domain tables, or domain state.
-- **One source of truth per domain.** Current state lives exactly once. Historical facts are append-only. Financial, inventory, and order facts are immutable once written.
-- **Privilege is a scope, not a code path.** God, seller, and ops capabilities differ only by authorization scope enforced inside domain APIs. No admin shortcuts or bypasses.
-- **Surfaces do not coordinate business rules.** UI stacks may orchestrate calls for UX, but never decide eligibility, pricing, refunds, or policy outcomes.
-- **Explicit dependencies only.** Stacks interact only through declared outputs, runtime configuration, and public domain APIs.
-- **Late binding over redeploys.** UI stacks resolve domain endpoints at runtime; domains deploy independently.
-- **Environment isolation by account.** Dev, staging, and prod are separated at the AWS account level.
-- **Minimal blast radius by design.** Domain stacks deploy independently; shared primitives change rarely.
-- **Idempotency is mandatory.** Any retriable handler must be idempotent.
-- **Derived state is disposable.** Projections and caches can be rebuilt from immutable logs.
-- **Authentication is centralized, enforcement is local.** Auth primitives are shared; enforcement happens per domain.
-- **Observability is non-optional.** Every compute emits structured logs with correlation IDs.
-- **Prefer boring AWS primitives.** DynamoDB, Lambda, S3, CloudFront first.
+This document defines the **final, compressed infrastructure layers**, their **contents**, **dependencies**, and **non-negotiable rules**, along with the **deployment order**.  
+It is intended to be the architectural target state.
 
 ---
 
-## 15.2 ObservabilityStack (`lib/observability/ObservabilityStack.ts`)
+## 1) Observability
 
-### Owns
-- S3 log archive bucket (NDJSON)
-- Firehose stream (DirectPut → S3) + processor Lambda
-- Athena results bucket
-- Glue database + external tables
-- Athena workgroup
-
-### Exports
-- Log archive bucket name/ARN  
-- Firehose stream name/ARN  
-- Glue database and table names  
-- Athena workgroup name  
+### Contains
+- Log archive buckets / Firehose / Athena / Glue / Workgroups  
+- (Optional) shared KMS keys  
+- (Optional) shared alarms and metrics  
 
 ### Depends on
-- None
+- Nothing
 
-### Depended on by
-- All Domain Stacks and Layer Stacks
+### Consumed by
+- All other layers (optional but recommended)
 
 ---
 
-## 15.3 EdgeDomainsStack (`lib/domains/EdgeDomainsStack.ts`)
+## 2) Domains and Certs
 
-### Owns
-- Route53 hosted zones: `wasit.eg`, `store.eg`
-- DNS records:
-  - `*.store.eg` → CloudFront
-  - Platform records under `wasit.eg`
-- ACM certificates:
-  - Wildcard `*.store.eg`
-  - Certificates for `wasit.eg` subdomains
-- DNS validation records
+### Contains
 
-### Exports
-- Hosted zone IDs/names
-- Certificate ARNs
-- Canonical domain names
+#### Platform domain primitives (dev: `wasit-platform.shop`)
+- Hosted zone + DNS records (authoritative or delegated)
+- Certificates:
+  - `admin.<platformRoot>` (CloudFront cert in **us-east-1**)
+  - `auth.<platformRoot>` (Cognito custom domain cert in **us-east-1**)
+  - `api.<platformRoot>` (only if using API Gateway custom domain directly; often regional)
+
+#### Storefront domain primitives (dev: `dev.cairoessentials.com`)
+- Hosted zone + wildcard record planning
+- Wildcard cert `*.dev.cairoessentials.com` (CloudFront cert in **us-east-1**)
 
 ### Depends on
-- None
+- Nothing (only stage config)
 
-### Depended on by
-- StorefrontStack  
-- WasitMainStack  
-- GodAdminStack  
+### Outputs
+- Stable hostnames (strings):
+  - `adminHost`
+  - `apiHost`
+  - `authHost`
+  - `storefrontWildcardHost`
+- Certificate ARNs per use-case
+- Hosted zone IDs
+
+### Non-negotiable rule
+- **No other layer creates certificates.**
 
 ---
 
-## 15.4 AuthStack (`lib/auth/AuthStack.ts`)
+## 3) Auth
 
-
-aws cloudfront create-invalidation \
-  --distribution-id E2N2B59MWGRBEA \
-  --paths "/*"
-
-### Owns
-- Authentication system (e.g., Cognito)
-- User groups and roles
-- API authorizers
-- IAM roles/policies (where required)
-
-### Exports
-- User Pool IDs / Client IDs
-- Authorizer ARNs/IDs
-- Issuer/JWKS metadata
-- Privileged role ARNs
+### Contains
+- Cognito User Pool
+- User Pool Client
+- Cognito custom domain: `auth.<platformRoot>`
+- Callback / logout URLs pinned to stable hostnames:
+  - `https://admin.<platformRoot>/auth/callback`
+  - `https://admin.<platformRoot>/logout` (or chosen path)
 
 ### Depends on
-- None
+- Domains and certs  
+  - (`authHost` certificate + `adminHost` string)
 
-### Depended on by
-- StorefrontStack  
-- WasitMainStack  
-- GodAdminStack  
-- All Domain API stacks  
+### Outputs
+- `userPoolId`
+- `clientId`
+- `issuer`
+- `authDomainUrl`
+
+### Non-negotiable rule
+- **Auth must not depend on Edge distribution hostnames.**
 
 ---
 
-## 15.5 StorefrontStack (`lib/storefront/StorefrontStack.ts`)
+## 4) Data and Tables
 
-### Owns
-- Tenant resolution:
-  - DynamoDB tenant table
-  - Resolver Lambda + endpoint
-- Storefront delivery:
-  - SSR Lambda
-  - Static assets bucket (optional)
-  - CloudFront distribution for `*.store.eg`
-- Edge security (optional)
-- Log subscriptions → Firehose
-
-### Exports
-- CloudFront distribution ID/domain
-- SSR origin endpoint
-- Tenant resolver endpoint
-- Tenant table name/ARN
-- Assets bucket name/ARN (if applicable)
+### Contains
+- `users_state`
+- `authz_capabilities`
+- `authz_grants`
+- Tenant / store metadata tables
+- (Later) product, order, payment, inventory tables
 
 ### Depends on
-- EdgeDomainsStack  
-- ObservabilityStack  
-- AuthStack (optional)
+- Nothing  
+- (Optionally Observability for alarms)
 
-### Depended on by
-- Public storefront traffic  
-- GodAdminStack  
+### Outputs
+- Table names and ARNs
+
+### Non-negotiable rule
+- **No Lambdas or APIs in this layer.**
 
 ---
 
-## 15.6 WasitMainStack (`lib/wasitmain/WasitMainStack.ts`)
+## 5) APIs & Control
 
-### Owns
-- CloudFront for `wasit.eg`
-- Static site or SSR origin
-- DNS records under `wasit.eg`
-- Logging wiring (if compute exists)
-
-### Exports
-- CloudFront distribution ID/domain
-- Static bucket or SSR endpoint
-- Canonical platform URLs
+### Contains
+- HTTP API(s) and routes
+- Lambdas:
+  - `/me`
+  - Tenant resolution (`/resolve`)
+  - Future admin / seller endpoints
+- JWT authorizers (optional now, but belong here)
+- Optional: `/.well-known/wasit-config` bootstrap endpoint
 
 ### Depends on
-- EdgeDomainsStack  
-- ObservabilityStack (if compute)  
-- AuthStack (optional)
+- Auth (issuer / authorizer inputs, `/me` resolver context)
+- Data and tables (DynamoDB)
+- Observability (optional)
 
-### Depended on by
-- Public platform traffic  
-- GodAdminStack  
+### Outputs
+- `apiBaseUrl`  
+  - Ideally stable via custom domain mapping: `https://api.<platformRoot>`
+- Tenant service URL (if separate)
 
----
-
-## 15.7 Domain Stacks
-
-### 15.7.1 Catalog (`lib/catalog/*`)
-Owns global products, listings, catalog APIs.  
-Depends on AuthStack, ObservabilityStack.  
-Depended on by Storefront, Orders, Pricing, Procurement, GodAdmin.
-
-### 15.7.2 Pricing (`lib/pricing/*`)
-Owns pricing state and APIs.  
-Depends on AuthStack, ObservabilityStack, Catalog.  
-Depended on by Orders, Storefront, GodAdmin.
-
-### 15.7.3 Inventory (`lib/inventory/*`)
-Owns inventory ledger and balance projections.  
-Depends on AuthStack, ObservabilityStack.  
-Depended on by Orders, Fulfillment, Procurement, GodAdmin.
-
-### 15.7.4 Procurement (`lib/procurement/*`)
-Owns inbound receipts and APIs.  
-Depends on Inventory, Catalog, AuthStack, ObservabilityStack.  
-Depended on by Inventory, Financials, GodAdmin.
-
-### 15.7.5 Orders (`lib/orders/*`)
-Owns orders, checkout, and pricing snapshots.  
-Depends on Catalog, Pricing, Inventory, AuthStack, ObservabilityStack.  
-Depended on by Fulfillment, Financials, GodAdmin.
-
-### 15.7.6 Fulfillment (`lib/fulfillment/*`)
-Owns fulfillment jobs and shipment logic.  
-Depends on Orders, Inventory, AuthStack, ObservabilityStack.  
-Depended on by Orders, Financials, GodAdmin.
-
-### 15.7.7 Financials (`lib/financials/*`)
-Owns ledgers, settlements, refunds, PSP webhooks.  
-Depends on Orders, AuthStack, ObservabilityStack.  
-Depended on by GodAdmin, Orders.
+### Non-negotiable rule
+- **This layer must be deployable without Edge.**
 
 ---
 
-## 15.8 GodAdminStack (`lib/admin/GodAdminStack.ts`)
+## 6) Edge
 
-### Purpose
-Highest-privilege operator UI. Terminal surface only.
+### Contains
 
-### Owns
-- Admin UI (`admin.wasit.eg`)
-- Thin UX aggregation layer
-- Auth integration and god-scope recognition
-- Correlation IDs and audit metadata
-- Observability wiring
+#### Platform edge
+- CloudFront distribution for admin UI
+- Route53 alias: `admin.<platformRoot>` → CloudFront
 
-### Does NOT Own
-- Domain APIs or tables
-- Business rules or domain logic
+#### Storefront edge
+- CloudFront distribution for `*.dev.cairoessentials.com`
+- Route53 wildcard alias → CloudFront
 
-### Invariant
-God mode expands authorization scope only; enforcement remains in domains.
+#### Storefront SSR wiring
+- CloudFront → SSR origin (service)
 
----
+> SSR runtime can live in **APIs & control** or **Edge**, but ownership should be:
+> - Runtime = control  
+> - Distribution + DNS = edge
 
-## 15.9 InternalOpsStack (`lib/ops/InternalOpsStack.ts`)
+### Depends on
+- Domains and certs (certificates + hosted zones)
+- APIs & control (only if routing to API or SSR origins)
 
-### Purpose
-Internal day-to-day operations UI.
+### Outputs
+- Stable public URLs:
+  - `https://admin.<platformRoot>`
+  - `https://<tenant>.dev.cairoessentials.com`
 
-### Owns
-- Ops UI (`ops.wasit.eg`)
-- Scoped auth (Ops/Support/ReadOnly)
-- Optional ops notes/audit store
-- Observability wiring
-
-### Does NOT Own
-- Domain APIs or business rules
-
-### Invariant
-InternalOps cannot bypass domain enforcement.
+### Non-negotiable rule
+- **Edge never feeds back into Auth.**
 
 ---
 
-## 15.10 SellerAdminStack (`lib/seller/SellerAdminStack.ts`)
+## 7) Frontend
 
-### Purpose
-Seller-facing backoffice UI, strictly store-scoped.
+### Contains
+- Platform frontend deployment (build + bucket sync)
+- Storefront frontend deployment (if separate from SSR)
+- CloudFront invalidations (if needed)
 
-### Owns
-- Seller admin UI
-- Seller auth and session handling
-- Store-scoped enforcement in client
-- Seller audit/activity logs
-- Observability wiring
+### Depends on
+- Edge (distributions / buckets must exist)
+- APIs & control (only for functional completeness; not required for deployment if stable domains are hardcoded)
 
-### Does NOT Own
-- Domain APIs or tables
-- Cross-store or platform logic
+### Non-negotiable rule
+- **Do not couple frontend builds to infra outputs unless you explicitly accept that tradeoff.**
 
-### Invariant
-All seller actions are store-scoped and enforced by domain APIs.
+---
+
+## Final Compressed Deployment Order
+
+1. Observability  
+2. Domains and certs  
+3. Auth  
+4. Data and tables  
+5. APIs & control  
+6. Edge  
+7. Frontend  
+
+---
+
+## Architectural Guarantees Preserved
+
+- Auth depends only on domains, **not Edge**  
+- APIs depend on **Auth + Data**  
+- Edge depends on **Domains + Origins (APIs / SSR)**  
+- Frontend is last and can be redeployed freely
+
+---

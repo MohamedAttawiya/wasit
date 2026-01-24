@@ -1,134 +1,113 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
-
-import * as s3 from "aws-cdk-lib/aws-s3";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
-import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
-import * as path from "path";
 
 export interface PlatformDomainsStackProps extends cdk.StackProps {
   stage: string;
 
-  platformDomain: string;
-  platformSubdomains?: string[];
-
-  enablePlatformCustomDomain?: boolean;
-
-  // ✅ NEW: publish auth.json alongside the frontend
-  authConfig?: {
-    clientId: string;
-    apiBaseUrl: string;
-    userPoolId: string;
-    issuer?: string;
-    cognitoDomain?: string;
-  };
+  // Only the root domain is provided by infra
+  platformRootDomain: string; // e.g. "wasit-platform.shop"
 }
 
 export class PlatformDomainsStack extends cdk.Stack {
-  public readonly platformFrontendBucket: s3.Bucket;
+  // Hosted zone
+  public readonly platformZone: route53.IHostedZone;
 
-  // Optional: only set when enablePlatformCustomDomain=true
-  public readonly platformZone?: route53.IHostedZone;
-  public readonly platformCertArn?: string;
+  // Stable hosts (stack contract)
+  public readonly adminHost: string;
+  public readonly authHost: string;
+  public readonly apiHost: string;
+  public readonly internalHost: string;
+
+  // Cert ARNs (stack contract)
+  public readonly wildcardCertArnUsEast1: string;
+  public readonly apiCertArnRegional: string;
 
   constructor(scope: Construct, id: string, props: PlatformDomainsStackProps) {
     super(scope, id, props);
 
-    const stage = (props.stage ?? "dev").toLowerCase();
-    const enable = props.enablePlatformCustomDomain ?? false;
+    // ----------------------------
+    // Minimum required subdomains (owned by the stack)
+    // ----------------------------
+    const ADMIN_SUBDOMAIN = "admin";
+    const AUTH_SUBDOMAIN = "auth";
+    const API_SUBDOMAIN = "api";
+    const INTERNAL_SUBDOMAIN = "internal";
 
-    // Always: platform frontend bucket
-    this.platformFrontendBucket = new s3.Bucket(this, "PlatformFrontendBucket", {
-      bucketName: `wasit-${stage}-platform-frontend-${this.account}-${this.region}`,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      enforceSSL: true,
-      versioned: false,
-      removalPolicy:
-        stage === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: stage === "prod" ? false : true,
-    });
+    // Stable host strings
+    this.adminHost = `${ADMIN_SUBDOMAIN}.${props.platformRootDomain}`;
+    this.authHost = `${AUTH_SUBDOMAIN}.${props.platformRootDomain}`;
+    this.apiHost = `${API_SUBDOMAIN}.${props.platformRootDomain}`;
+    this.internalHost = `${INTERNAL_SUBDOMAIN}.${props.platformRootDomain}`;
 
-    // Auto-upload local platform-frontend -> S3 on deploy
-    const authJson =
-      props.authConfig
-        ? JSON.stringify(
-            {
-              clientID: props.authConfig.clientId,
-              apiBaseUrl: props.authConfig.apiBaseUrl,
-              userPoolId: props.authConfig.userPoolId,
-              issuer: props.authConfig.issuer,
-              cognitoDomain: props.authConfig.cognitoDomain,
-            },
-            null,
-            2
-          )
-        : undefined;
-
-    new s3deploy.BucketDeployment(this, "DeployPlatformFrontend", {
-      destinationBucket: this.platformFrontendBucket,
-      sources: [
-        s3deploy.Source.asset(path.join(__dirname, "../../../platform-frontend"), {
-          exclude: ["auth.json"],
-        }),
-      ],
-
-      // ✅ IMPORTANT: do NOT delete files created by other deployments (auth.json)
-      prune: false,
-    });
-
-
-
-    new cdk.CfnOutput(this, "PlatformFrontendBucketName", {
-      value: this.platformFrontendBucket.bucketName,
-      exportName: `wasit-${stage}-platform-frontend-bucket`,
-    });
-
-    if (!enable) {
-      new cdk.CfnOutput(this, "PlatformCustomDomainEnabled", {
-        value: "false",
-        exportName: `wasit-${stage}-platform-custom-domain-enabled`,
-      });
-      return;
-    }
-
-    // Hosted Zone (only when enabled)
+    // ----------------------------
+    // Hosted zone (authoritative)
+    // ----------------------------
     const zone = new route53.PublicHostedZone(this, "PlatformZone", {
-      zoneName: props.platformDomain,
+      zoneName: props.platformRootDomain,
     });
     this.platformZone = zone;
 
-    // Certificate MUST be us-east-1 for CloudFront
-    const altNames =
-      props.platformSubdomains?.map((s) => `${s}.${props.platformDomain}`) ?? [];
+    // ----------------------------
+    // Certificates
+    // ----------------------------
 
-    const cert = new acm.DnsValidatedCertificate(this, "PlatformCertUsEast1", {
-      domainName: props.platformDomain,
-      subjectAlternativeNames: altNames.length ? altNames : undefined,
-      hostedZone: zone,
-      region: "us-east-1",
-    });
-    this.platformCertArn = cert.certificateArn;
+    /**
+     * Shared EDGE cert (CloudFront + Cognito + internal tools)
+     * Covers:
+     *   admin.*
+     *   auth.*
+     *   internal.*
+     */
+    const wildcardCert = new acm.DnsValidatedCertificate(
+      this,
+      "PlatformWildcardCertUsEast1",
+      {
+        domainName: `*.${props.platformRootDomain}`,
+        hostedZone: zone,
+        region: "us-east-1",
+      }
+    );
+    this.wildcardCertArnUsEast1 = wildcardCert.certificateArn;
 
-    new cdk.CfnOutput(this, "PlatformCustomDomainEnabled", {
-      value: "true",
-      exportName: `wasit-${stage}-platform-custom-domain-enabled`,
-    });
+    /**
+     * API Gateway custom domain cert (regional)
+     * api.<platformRoot>
+     */
+    const apiCert = new acm.DnsValidatedCertificate(
+      this,
+      "ApiCertRegional",
+      {
+        domainName: this.apiHost,
+        hostedZone: zone,
+        // created in stack region (eu-central-1)
+      }
+    );
+    this.apiCertArnRegional = apiCert.certificateArn;
 
+    // ----------------------------
+    // Outputs (contract for downstream layers)
+    // ----------------------------
     new cdk.CfnOutput(this, "PlatformHostedZoneId", {
       value: zone.hostedZoneId,
-      exportName: `wasit-${stage}-platform-zone-id`,
     });
 
-    new cdk.CfnOutput(this, "PlatformHostedZoneName", {
-      value: zone.zoneName,
-      exportName: `wasit-${stage}-platform-zone-name`,
+    new cdk.CfnOutput(this, "PlatformHostedZoneNameServers", {
+      value: cdk.Fn.join(",", zone.hostedZoneNameServers ?? []),
     });
 
-    new cdk.CfnOutput(this, "PlatformCertArnUsEast1", {
-      value: cert.certificateArn,
-      exportName: `wasit-${stage}-platform-cert-arn-us-east-1`,
+    new cdk.CfnOutput(this, "AdminHost", { value: this.adminHost });
+    new cdk.CfnOutput(this, "AuthHost", { value: this.authHost });
+    new cdk.CfnOutput(this, "ApiHost", { value: this.apiHost });
+    new cdk.CfnOutput(this, "InternalHost", { value: this.internalHost });
+
+    new cdk.CfnOutput(this, "WildcardCertArnUsEast1", {
+      value: this.wildcardCertArnUsEast1,
+    });
+
+    new cdk.CfnOutput(this, "ApiCertArnRegional", {
+      value: this.apiCertArnRegional,
     });
   }
 }
