@@ -1,33 +1,22 @@
-import {
-  DynamoDBClient,
-  QueryCommand,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient, QueryCommand } from "@aws-sdk/client-dynamodb";
 
-export function createGrantResolver(
-  principalUserId: string,
-  tableName: string,
-  ddb = new DynamoDBClient({})
-) {
-  const pk = `PRINCIPAL#USER#${principalUserId}`;
+const ddb = new DynamoDBClient({});
 
-  async function has(resource: string, perm: string): Promise<boolean> {
-    const sk = `RESOURCE#${resource}#PERM#${perm}`;
+export async function resolveGrants(userId: string, table: string) {
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: table,
+      KeyConditionExpression: "pk = :pk",
+      ExpressionAttributeValues: {
+        ":pk": { S: `PRINCIPAL#USER#${userId}` },
+      },
+    })
+  );
 
-    const res = await ddb.send(
-      new QueryCommand({
-        TableName: tableName,
-        KeyConditionExpression: "#pk = :pk AND #sk = :sk",
-        ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk" },
-        ExpressionAttributeValues: {
-          ":pk": { S: pk },
-          ":sk": { S: sk },
-        },
-        Limit: 1,
-      })
-    );
-
-    return (res.Count ?? 0) > 0;
-  }
-
-  return { has };
+  return (
+    res.Items?.map((i) => ({
+      resource: i.resource.S!,
+      perm: i.perm.S!,
+    })) || []
+  );
 }

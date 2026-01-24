@@ -8,9 +8,7 @@ import * as ddb from "aws-cdk-lib/aws-dynamodb";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
-import * as apigwv2Auth from "aws-cdk-lib/aws-apigatewayv2-authorizers";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
-import * as iam from "aws-cdk-lib/aws-iam";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 
 export interface AuthControlPlaneStackProps extends cdk.StackProps {
@@ -183,16 +181,23 @@ export class AuthControlPlaneStack extends cdk.Stack {
     });
 
     // ----------------------------
-    // Control Plane Lambda
+    // Auth Resolver Lambda (GET /me only)
+    // - No Cognito calls
+    // - No authorizers at API Gateway
+    // - @wasit/authz verifies JWT from headers
     // ----------------------------
     this.controlPlaneFn = new NodejsFunction(this, "AuthControlPlaneFn", {
       runtime: lambda.Runtime.NODEJS_20_X,
-      entry: path.join(__dirname, "../../lambda/auth/index.js"),
+      entry: path.join(__dirname, "../../lambda/auth/index.js"), // adjust to .js if you kept JS
       handler: "handler",
       timeout: cdk.Duration.seconds(15),
       memorySize: 256,
       environment: {
+        // For @wasit/authz verification (reads these from env)
         USER_POOL_ID: this.userPool.userPoolId,
+        CLIENT_ID: this.webClient.userPoolClientId,
+
+        // For resolution
         USERS_STATE_TABLE: this.usersStateTable.tableName,
         AUTHZ_GRANTS_TABLE: this.authzGrantsTable.tableName,
         AUTHZ_CAPABILITIES_TABLE: this.authzCapabilitiesTable.tableName,
@@ -204,50 +209,39 @@ export class AuthControlPlaneStack extends cdk.Stack {
       },
     });
 
-    this.usersStateTable.grantReadWriteData(this.controlPlaneFn);
-    this.authzGrantsTable.grantReadWriteData(this.controlPlaneFn);
-    this.authzCapabilitiesTable.grantReadWriteData(this.controlPlaneFn);
-
-    this.controlPlaneFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["cognito-idp:*"],
-        resources: [this.userPool.userPoolArn],
-      })
-    );
+    // Least privilege: resolver should be read-only
+    this.usersStateTable.grantReadData(this.controlPlaneFn);
+    this.authzGrantsTable.grantReadData(this.controlPlaneFn);
+    this.authzCapabilitiesTable.grantReadData(this.controlPlaneFn);
 
     // ----------------------------
-    // HTTP API + JWT Authorizer
+    // HTTP API (single route: GET /me)
     // ----------------------------
     this.httpApi = new apigwv2.HttpApi(this, "AuthControlPlaneHttpApi", {
       apiName: `${prefix}-auth-control-plane`,
       corsPreflight: {
         allowHeaders: ["authorization", "content-type", "x-correlation-id"],
-        allowMethods: [
-          apigwv2.CorsHttpMethod.GET,
-          apigwv2.CorsHttpMethod.POST,
-          apigwv2.CorsHttpMethod.PATCH,
-          apigwv2.CorsHttpMethod.DELETE,
-        ],
+        allowMethods: [apigwv2.CorsHttpMethod.GET],
         allowOrigins: props.corsAllowOrigins ?? ["http://localhost:3000"],
       },
     });
 
     const integration = new apigwv2Integrations.HttpLambdaIntegration(
-      "ControlPlaneIntegration",
+      "AuthControlPlaneIntegration",
       this.controlPlaneFn
     );
 
-    const authorizer = new apigwv2Auth.HttpJwtAuthorizer(
-      "JwtAuthorizer",
-      this.issuer,
-      { jwtAudience: [this.webClient.userPoolClientId] }
-    );
-
+    // Single endpoint
     this.httpApi.addRoutes({
-      path: "/{proxy+}",
-      methods: [apigwv2.HttpMethod.ANY],
+      path: "/me",
+      methods: [apigwv2.HttpMethod.GET],
       integration,
-      authorizer,
     });
+
+    // Optional: helpful outputs
+    new cdk.CfnOutput(this, "AuthApiBaseUrl", { value: this.httpApi.url ?? "" });
+    new cdk.CfnOutput(this, "CognitoIssuer", { value: this.issuer });
+    new cdk.CfnOutput(this, "UserPoolId", { value: this.userPool.userPoolId });
+    new cdk.CfnOutput(this, "WebClientId", { value: this.webClient.userPoolClientId });
   }
 }

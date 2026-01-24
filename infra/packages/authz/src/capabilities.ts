@@ -1,14 +1,9 @@
-import {
-  DynamoDBClient,
-  BatchGetItemCommand,
-} from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient, BatchGetItemCommand } from "@aws-sdk/client-dynamodb";
 
-export async function resolveCapabilities(
-  groups: string[],
-  tableName: string,
-  ddb = new DynamoDBClient({})
-): Promise<Set<string>> {
-  if (!groups.length) return new Set();
+const ddb = new DynamoDBClient({});
+
+export async function resolveCapabilities(groups: string[], table: string) {
+  if (!groups.length) return [];
 
   const keys = groups.map((g) => ({
     pk: { S: `GROUP#${g}` },
@@ -17,18 +12,21 @@ export async function resolveCapabilities(
   const res = await ddb.send(
     new BatchGetItemCommand({
       RequestItems: {
-        [tableName]: { Keys: keys },
+        [table]: {
+          Keys: keys,
+        },
       },
     })
   );
 
-  const caps = new Set<string>();
+  const items = res.Responses?.[table] || [];
 
-  for (const item of res.Responses?.[tableName] ?? []) {
-    for (const c of item.capabilities?.SS ?? []) {
-      caps.add(c);
+  const set = new Set<string>();
+  for (const i of items) {
+    for (const c of i.capabilities?.SS || []) {
+      set.add(c);
     }
   }
 
-  return caps;
+  return [...set];
 }

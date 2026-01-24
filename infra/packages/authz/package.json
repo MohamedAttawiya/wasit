@@ -1,21 +1,54 @@
 {
   "name": "@wasit/authz",
   "version": "0.0.0",
+  "private": true,
   "type": "module",
+  "sideEffects": false,
+  "files": ["dist"],
+
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "scripts": {
-  "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-  "build": "npm run clean && tsc -p tsconfig.json"
-},
+
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+
+    "./capabilities": {
+      "types": "./dist/capabilities.d.ts",
+      "default": "./dist/capabilities.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "default": "./dist/errors.js"
+    },
     "./grants": {
       "types": "./dist/grants.d.ts",
       "default": "./dist/grants.js"
+    },
+    "./principal": {
+      "types": "./dist/principal.d.ts",
+      "default": "./dist/principal.js"
+    },
+    "./resolve": {
+      "types": "./dist/resolve.d.ts",
+      "default": "./dist/resolve.js"
+    },
+    "./state": {
+      "types": "./dist/state.d.ts",
+      "default": "./dist/state.js"
+    },
+
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
     }
+  },
+
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "prepack": "npm run build"
   }
 }

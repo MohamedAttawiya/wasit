@@ -1,6 +1,8 @@
 // packages/authz/src/index.ts
-
-export * from "./core.js";
-
-// IMPORTANT: do NOT export grants from the root,
-// or every import of "@wasit/authz" drags AWS SDK into all lambdas.
+export * from "./errors.js";
+export * from "./principal.js";
+export * from "./state.js";
+export * from "./capabilities.js";
+export * from "./grants.js";
+export * from "./resolve.js";
+export * from "./guards.js"; // FIXED: was gaurds.js

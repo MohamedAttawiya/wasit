@@ -1,32 +1,36 @@
-type JwtClaims = Record<string, any>;
+import { verifyAccessToken } from "./verify.js";
+import { UnauthorizedError } from "./errors.js";
 
-export interface Principal {
+export type Principal = {
   userId: string;
   email?: string;
   groups: string[];
-  claims: JwtClaims;
+  claims: Record<string, any>;
+};
+
+function extractBearer(event: any): string | null {
+  const h = event?.headers?.authorization || event?.headers?.Authorization;
+  if (!h) return null;
+  const m = String(h).match(/^Bearer\s+(.+)$/i);
+  return m?.[1] || null;
 }
 
-export function parsePrincipal(event: any): Principal {
-  const claims =
-    event?.requestContext?.authorizer?.jwt?.claims ??
-    event?.requestContext?.authorizer?.claims ??
-    {};
+export async function resolvePrincipalOptional(event: any): Promise<Principal | null> {
+  const token = extractBearer(event);
+  if (!token) return null;
 
-  const userId = String(claims.sub ?? "").trim();
-  if (!userId) {
-    throw new Error("Missing JWT sub");
-  }
+  const claims = await verifyAccessToken(token);
 
-  const email = claims.email ? String(claims.email).toLowerCase() : undefined;
-  const groups = normalizeGroups(claims["cognito:groups"]);
-
-  return { userId, email, groups, claims };
+  return {
+    userId: claims.sub,
+    email: claims.email?.toLowerCase(),
+    groups: claims["cognito:groups"] || [],
+    claims,
+  };
 }
 
-function normalizeGroups(v: any): string[] {
-  if (!v) return [];
-  if (Array.isArray(v)) return v.map(String);
-  if (typeof v === "string") return v.split(",").map((s) => s.trim());
-  return [];
+export async function resolvePrincipalRequired(event: any): Promise<Principal> {
+  const principal = await resolvePrincipalOptional(event);
+  if (!principal) throw new UnauthorizedError("Missing or invalid token");
+  return principal;
 }

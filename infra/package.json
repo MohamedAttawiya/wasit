@@ -30,6 +30,7 @@
     "@aws-sdk/lib-dynamodb": "^3.968.0",
     "@wasit/authz": "workspace:*",
     "aws-cdk-lib": "^2.232.1",
+    "aws-jwt-verify": "^5.1.1",
     "aws4fetch": "^1.0.20",
     "constructs": "^10.4.4"
   }

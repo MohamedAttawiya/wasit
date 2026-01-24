@@ -8,7 +8,6 @@ import { StorefrontEdgeStack } from "../lib/domains/StorefrontEdgeStack";
 import { AuthControlPlaneStack } from "../lib/auth/AuthControlPlaneStack";
 import { PlatformDomainsStack } from "../lib/domains/PlatformDomainsStack";
 import { PlatformEdgeStack } from "../lib/domains/PlatformEdgeStack";
-import { AuthzSmokeStack } from "../lib/auth/AuthzSmokeStack";
 import { PlatformConfigStack } from "../lib/domains/PlatformConfigStack";
 
 
@@ -69,12 +68,6 @@ new StorefrontEdgeStack(app, `${PREFIX}-storefront-edge`, {
   domainRecordName: "*",
 });
 
-if (STAGE === "dev") {
-  new AuthzSmokeStack(app, `${PREFIX}-authz-smoke`, {
-    env: envEU,
-    prefix: PREFIX,
-  });
-}
 
 // ------------------------------
 // Platform: bucket + (optional) zone/cert

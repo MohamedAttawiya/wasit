@@ -1,33 +1,31 @@
-import { parsePrincipal } from "./principal.js";
+import {
+  resolvePrincipalOptional,
+  resolvePrincipalRequired,
+} from "./principal.js";
 import { resolveUserState } from "./state.js";
 import { resolveCapabilities } from "./capabilities.js";
-import { createGrantResolver } from "./grants.js";
+import { resolveGrants } from "./grants.js";
+import { ForbiddenError } from "./errors.js";
 
-export interface ResolveAuthContextOptions {
+type Opts = {
   usersStateTable: string;
-  authzGrantsTable: string;
   authzCapabilitiesTable: string;
-}
+  authzGrantsTable: string;
+};
 
-export async function resolveAuthContext(
-  event: any,
-  opts: ResolveAuthContextOptions
-) {
-  const principal = parsePrincipal(event);
+async function resolve(principal: any, opts: Opts) {
+  const state =
+    principal?.email
+      ? await resolveUserState(principal.email, opts.usersStateTable)
+      : null;
 
-  const state = principal.email
-    ? await resolveUserState(principal.email, opts.usersStateTable)
-    : null;
+  const capabilities = principal
+    ? await resolveCapabilities(principal.groups, opts.authzCapabilitiesTable)
+    : [];
 
-  const capabilities = await resolveCapabilities(
-    principal.groups,
-    opts.authzCapabilitiesTable
-  );
-
-  const grants = createGrantResolver(
-    principal.userId,
-    opts.authzGrantsTable
-  );
+  const grants = principal
+    ? await resolveGrants(principal.userId, opts.authzGrantsTable)
+    : [];
 
   return {
     principal,
@@ -35,4 +33,20 @@ export async function resolveAuthContext(
     capabilities,
     grants,
   };
+}
+
+export async function resolveAuthContextOptional(event: any, opts: Opts) {
+  const principal = await resolvePrincipalOptional(event);
+  return resolve(principal, opts);
+}
+
+export async function resolveAuthContextRequired(event: any, opts: Opts) {
+  const principal = await resolvePrincipalRequired(event);
+  const ctx = await resolve(principal, opts);
+
+  if (ctx.state !== "ACTIVE") {
+    throw new ForbiddenError("User not active");
+  }
+
+  return ctx;
 }

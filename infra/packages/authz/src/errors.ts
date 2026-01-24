@@ -1,29 +1,21 @@
-export class AuthzError extends Error {
-  public readonly statusCode: number;
-  public readonly code: string;
-
-  constructor(statusCode: number, code: string, message: string) {
-    super(message);
-    this.statusCode = statusCode;
-    this.code = code;
-  }
+export class UnauthorizedError extends Error {
+  statusCode = 401;
 }
 
-export function toHttpErrorResponse(err: any) {
-  if (err instanceof AuthzError) {
+export class ForbiddenError extends Error {
+  statusCode = 403;
+}
+
+export function toHttpError(err: any) {
+  if (err?.statusCode) {
     return {
       statusCode: err.statusCode,
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ error: err.code, message: err.message }),
+      body: JSON.stringify({ error: err.message || "Access denied" }),
     };
   }
 
   return {
     statusCode: 500,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      error: "INTERNAL",
-      message: "Internal server error",
-    }),
+    body: JSON.stringify({ error: "Internal error" }),
   };
 }
