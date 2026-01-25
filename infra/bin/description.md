@@ -1,195 +1,107 @@
-# Wasit Infrastructure — Compressed Layering & Deployment Order
 
-This document defines the **final, compressed infrastructure layers**, their **contents**, **dependencies**, and **non-negotiable rules**, along with the **deployment order**.  
-It is intended to be the architectural target state.
+https://auth.wasit-platform.shop/oauth2/authorize?response_type=code&client_id=4ia0l44d9h3th3hiv911b7pf1i&redirect_uri=https://admin.wasit-platform.shop/callback&scope=openid+email+profile
 
----
+# Wasit Deployment Domains — Order and Dependencies
 
-## 1) Observability
-
-### Contains
-- Log archive buckets / Firehose / Athena / Glue / Workgroups  
-- (Optional) shared KMS keys  
-- (Optional) shared alarms and metrics  
-
-### Depends on
-- Nothing
-
-### Consumed by
-- All other layers (optional but recommended)
+This is the **domain-owned deployment order** for Wasit. Each item is a deployable “domain” (CDK stack group) that owns its data + compute + APIs for that domain.
 
 ---
 
-## 2) Domains and Certs
-
-### Contains
-
-#### Platform domain primitives (dev: `wasit-platform.shop`)
-- Hosted zone + DNS records (authoritative or delegated)
-- Certificates:
-  - `admin.<platformRoot>` (CloudFront cert in **us-east-1**)
-  - `auth.<platformRoot>` (Cognito custom domain cert in **us-east-1**)
-  - `api.<platformRoot>` (only if using API Gateway custom domain directly; often regional)
-
-#### Storefront domain primitives (dev: `dev.cairoessentials.com`)
-- Hosted zone + wildcard record planning
-- Wildcard cert `*.dev.cairoessentials.com` (CloudFront cert in **us-east-1**)
-
-### Depends on
-- Nothing (only stage config)
-
-### Outputs
-- Stable hostnames (strings):
-  - `adminHost`
-  - `apiHost`
-  - `authHost`
-  - `storefrontWildcardHost`
-- Certificate ARNs per use-case
-- Hosted zone IDs
-
-### Non-negotiable rule
-- **No other layer creates certificates.**
+## 1) Observability (Platform Domain)
+**Depends on:** nothing  
+**Enables:** centralized logging/metrics for everything else  
+**Owns:** log archive, firehose, athena/glue, shared alarms (optional)
 
 ---
 
-## 3) Auth
+## 2) Domains & Certificates (Platform Domain)
+**Depends on:** nothing  
+**Enables:** all stable hostnames + TLS for CloudFront/Cognito/APIs  
+**Owns:**
+- Route53 hosted zones + records (as needed)
+- ACM certs:
+  - us-east-1 (CloudFront/Cognito-backed)
+  - regional certs (if needed later)
 
-### Contains
-- Cognito User Pool
-- User Pool Client
-- Cognito custom domain: `auth.<platformRoot>`
-- Callback / logout URLs pinned to stable hostnames:
-  - `https://admin.<platformRoot>/auth/callback`
-  - `https://admin.<platformRoot>/logout` (or chosen path)
-
-### Depends on
-- Domains and certs  
-  - (`authHost` certificate + `adminHost` string)
-
-### Outputs
-- `userPoolId`
-- `clientId`
-- `issuer`
-- `authDomainUrl`
-
-### Non-negotiable rule
-- **Auth must not depend on Edge distribution hostnames.**
+**Rule:** no other domain creates certs.
 
 ---
 
-## 4) Data and Tables
-
-### Contains
-- `users_state`
-- `authz_capabilities`
-- `authz_grants`
-- Tenant / store metadata tables
-- (Later) product, order, payment, inventory tables
-
-### Depends on
-- Nothing  
-- (Optionally Observability for alarms)
-
-### Outputs
-- Table names and ARNs
-
-### Non-negotiable rule
-- **No Lambdas or APIs in this layer.**
+## 3) Auth (Control Plane Domain)
+**Depends on:** Domains & Certificates  
+**Enables:** identity + JWTs + authorization model used by all control planes  
+**Owns:**
+- Cognito user pool + client + custom domain (`auth.<platformRoot>`)
+- Auth data model: `users_state`, `authz_capabilities`, `authz_grants`
+- Auth API: `/me`, `/admin/*`
+- Authz enforcement logic (`ACTIVE`, capabilities)
 
 ---
 
-## 5) APIs & Control
-
-### Contains
-- HTTP API(s) and routes
-- Lambdas:
-  - `/me`
-  - Tenant resolution (`/resolve`)
-  - Future admin / seller endpoints
-- JWT authorizers (optional now, but belong here)
-- Optional: `/.well-known/wasit-config` bootstrap endpoint
-
-### Depends on
-- Auth (issuer / authorizer inputs, `/me` resolver context)
-- Data and tables (DynamoDB)
-- Observability (optional)
-
-### Outputs
-- `apiBaseUrl`  
-  - Ideally stable via custom domain mapping: `https://api.<platformRoot>`
-- Tenant service URL (if separate)
-
-### Non-negotiable rule
-- **This layer must be deployable without Edge.**
+## 4) Tenant Registry (Control Plane Domain)
+**Depends on:** Auth  
+**Enables:** multi-tenancy resolution and onboarding  
+**Owns:**
+- Tenants table(s): tenant/store metadata, hostnames, status
+- Tenant resolution API: “who is this host?”, “what tenant is this user in?”
+- Admin-only onboarding endpoints (create tenant/store, assign owners)
 
 ---
 
-## 6) Edge
-
-### Contains
-
-#### Platform edge
-- CloudFront distribution for admin UI
-- Route53 alias: `admin.<platformRoot>` → CloudFront
-
-#### Storefront edge
-- CloudFront distribution for `*.dev.cairoessentials.com`
-- Route53 wildcard alias → CloudFront
-
-#### Storefront SSR wiring
-- CloudFront → SSR origin (service)
-
-> SSR runtime can live in **APIs & control** or **Edge**, but ownership should be:
-> - Runtime = control  
-> - Distribution + DNS = edge
-
-### Depends on
-- Domains and certs (certificates + hosted zones)
-- APIs & control (only if routing to API or SSR origins)
-
-### Outputs
-- Stable public URLs:
-  - `https://admin.<platformRoot>`
-  - `https://<tenant>.dev.cairoessentials.com`
-
-### Non-negotiable rule
-- **Edge never feeds back into Auth.**
+## 5) Commerce Core (Application Domain)
+**Depends on:** Auth, Tenant Registry  
+**Enables:** actual platform transactions  
+**Owns (initial):**
+- Catalog (products, categories)
+- Orders + order items
+- Inventory state/events (if you’re doing ledger + derived state)
 
 ---
 
-## 7) Frontend
-
-### Contains
-- Platform frontend deployment (build + bucket sync)
-- Storefront frontend deployment (if separate from SSR)
-- CloudFront invalidations (if needed)
-
-### Depends on
-- Edge (distributions / buckets must exist)
-- APIs & control (only for functional completeness; not required for deployment if stable domains are hardcoded)
-
-### Non-negotiable rule
-- **Do not couple frontend builds to infra outputs unless you explicitly accept that tradeoff.**
+## 6) Payments & Ledger (Application Domain)
+**Depends on:** Commerce Core, Auth, Tenant Registry  
+**Enables:** payment intent/capture/refund and financial truth  
+**Owns:**
+- Payments, refunds, ledger entries
+- Idempotency and reconciliation primitives
 
 ---
 
-## Final Compressed Deployment Order
+## 7) Fulfillment / Shipping (Application Domain)
+**Depends on:** Commerce Core, Auth, Tenant Registry  
+**Enables:** delivery workflows and carrier integrations  
+**Owns:**
+- Fulfillment jobs, shipment state, tracking
+- Carrier adapters (e.g., Bosta)
 
+---
+
+## 8) Edge Delivery (Platform Edge Domain)
+**Depends on:** Domains & Certificates, Origins from control/app domains  
+**Enables:** stable public entry points  
+**Owns:**
+- Admin UI distribution (`admin.<platformRoot>`)
+- Storefront wildcard distribution (`*.storefrontRoot`)
+- DNS aliases to CloudFront
+
+**Rule:** Edge never feeds back into Auth.
+
+---
+
+## 9) Frontend Deployments (Delivery Domain)
+**Depends on:** Edge Delivery  
+**Enables:** shipping UI builds and redeploying safely  
+**Owns:**
+- Build + upload (S3)
+- CloudFront invalidation (if used)
+
+---
+
+## Minimal Deploy Order (MVP)
 1. Observability  
-2. Domains and certs  
+2. Domains & Certificates  
 3. Auth  
-4. Data and tables  
-5. APIs & control  
-6. Edge  
-7. Frontend  
-
----
-
-## Architectural Guarantees Preserved
-
-- Auth depends only on domains, **not Edge**  
-- APIs depend on **Auth + Data**  
-- Edge depends on **Domains + Origins (APIs / SSR)**  
-- Frontend is last and can be redeployed freely
-
----
+4. Tenant Registry  
+5. Commerce Core  
+6. Edge Delivery  
+7. Frontend Deployments  
