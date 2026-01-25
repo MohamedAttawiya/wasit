@@ -8,11 +8,24 @@ export interface PlatformDomainsStackProps extends cdk.StackProps {
 
   // Only the root domain is provided by infra
   platformRootDomain: string; // e.g. "wasit-platform.shop"
+
+  /**
+   * Edge wildcard cert ARN already issued in us-east-1:
+   *   *.wasit-platform.shop
+   *
+   * This stack DOES NOT create it (single-stack constraint).
+   * It only consumes and outputs it as part of the contract.
+   */
+  platformWildcardCertArnUsEast1: string;
 }
 
 export class PlatformDomainsStack extends cdk.Stack {
   // Hosted zone
   public readonly platformZone: route53.IHostedZone;
+
+  // These names match what your infra.ts expects
+  public readonly platformRootDomain: string;
+  public readonly platformHostedZoneId: string;
 
   // Stable hosts (stack contract)
   public readonly adminHost: string;
@@ -26,6 +39,8 @@ export class PlatformDomainsStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: PlatformDomainsStackProps) {
     super(scope, id, props);
+
+    this.platformRootDomain = props.platformRootDomain;
 
     // ----------------------------
     // Minimum required subdomains (owned by the stack)
@@ -47,43 +62,31 @@ export class PlatformDomainsStack extends cdk.Stack {
     const zone = new route53.PublicHostedZone(this, "PlatformZone", {
       zoneName: props.platformRootDomain,
     });
+
     this.platformZone = zone;
+    this.platformHostedZoneId = zone.hostedZoneId;
 
     // ----------------------------
     // Certificates
     // ----------------------------
 
     /**
-     * Shared EDGE cert (CloudFront + Cognito + internal tools)
-     * Covers:
-     *   admin.*
-     *   auth.*
-     *   internal.*
+     * Edge wildcard cert (us-east-1) is NOT created here.
+     * We import its ARN (already issued) and expose it to downstream stacks.
      */
-    const wildcardCert = new acm.DnsValidatedCertificate(
-      this,
-      "PlatformWildcardCertUsEast1",
-      {
-        domainName: `*.${props.platformRootDomain}`,
-        hostedZone: zone,
-        region: "us-east-1",
-      }
-    );
-    this.wildcardCertArnUsEast1 = wildcardCert.certificateArn;
+    this.wildcardCertArnUsEast1 = props.platformWildcardCertArnUsEast1;
 
     /**
-     * API Gateway custom domain cert (regional)
+     * Regional cert for API Gateway custom domain:
      * api.<platformRoot>
+     *
+     * Must be created in the same region as the API Gateway domain
+     * (your primary region, e.g. eu-central-1).
      */
-    const apiCert = new acm.DnsValidatedCertificate(
-      this,
-      "ApiCertRegional",
-      {
-        domainName: this.apiHost,
-        hostedZone: zone,
-        // created in stack region (eu-central-1)
-      }
-    );
+    const apiCert = new acm.Certificate(this, "ApiCertRegional", {
+      domainName: this.apiHost,
+      validation: acm.CertificateValidation.fromDns(zone),
+    });
     this.apiCertArnRegional = apiCert.certificateArn;
 
     // ----------------------------
@@ -95,6 +98,10 @@ export class PlatformDomainsStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, "PlatformHostedZoneNameServers", {
       value: cdk.Fn.join(",", zone.hostedZoneNameServers ?? []),
+    });
+
+    new cdk.CfnOutput(this, "PlatformRootDomain", {
+      value: props.platformRootDomain,
     });
 
     new cdk.CfnOutput(this, "AdminHost", { value: this.adminHost });
